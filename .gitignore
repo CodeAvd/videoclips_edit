@@ -1,0 +1,10 @@
+.DS_Store
+
+backend/.data/
+backend/.pytest_cache/
+backend/.venv/
+backend/__pycache__/
+backend/ai_shorts_engine_backend.egg-info/
+backend/*.sqlite3
+backend/**/*.pyc
+backend/**/__pycache__/
