@@ -81,33 +81,34 @@ def build_style_evidence_v2(
     transcript_lead: str | None,
     vlm_labels: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
-    hook_family_value = _pick_vlm_value(vlm_labels, "hook_family") or hook_family(
+    hook_family_value = hook_family(
         hook_text=entry.hook_text,
         transcript_lead=transcript_lead,
         notes=entry.notes,
     )
-    overlay_family_value = _pick_vlm_value(vlm_labels, "overlay_family") or overlay_family(
+    overlay_family_value = overlay_family(
         notes=entry.notes,
         subtitle_source=caption_evidence["subtitle_source"],
         headline_card_presence=bool(ocr_summary.get("headline_card_presence")),
         burned_caption_present=bool(ocr_summary.get("burned_caption_present")),
     )
-    opening_mode = _pick_vlm_value(vlm_labels, "opening_frame_mode") or opening_frame_mode(
+    opening_mode = opening_frame_mode(
         notes=entry.notes,
         burned_caption_present=bool(ocr_summary.get("burned_caption_present")),
         text_occupancy_band=ocr_summary.get("text_occupancy_band", "none"),
-        proof_asset_presence=False,
+        proof_asset_presence=bool(_pick_vlm_value(vlm_labels, "proof_asset_presence")),
     )
-    pattern_interrupts = _pick_vlm_value(vlm_labels, "pattern_interrupt_types") or pattern_interrupt_types(
+    pattern_interrupts = pattern_interrupt_types(
         notes=entry.notes,
         cut_density_per_minute=technical_probe.get("cut_density_per_minute", 0.0),
         headline_card_presence=bool(ocr_summary.get("headline_card_presence")),
     )
+    if not pattern_interrupts:
+        pattern_interrupts = _pick_vlm_value(vlm_labels, "pattern_interrupt_types") or []
     if isinstance(pattern_interrupts, str):
         pattern_interrupts = [pattern_interrupts]
-    effect_density_value = _pick_vlm_value(vlm_labels, "effect_density") or cut_density_band(
-        technical_probe.get("cut_density_per_minute", 0.0)
-    )
+    effect_density_value = cut_density_band(technical_probe.get("cut_density_per_minute", 0.0))
+    proof_asset_presence = _pick_vlm_value(vlm_labels, "proof_asset_presence")
     note_tokens = (entry.notes or "").lower()
     broll_density = "high" if any(token in note_tokens for token in ("b-roll", "broll", "insert", "footage")) else "low"
     punch_in = "high" if "zoom" in note_tokens or technical_probe.get("cut_density_per_minute", 0.0) >= 24 else "medium"
@@ -121,21 +122,21 @@ def build_style_evidence_v2(
         "overlay_family": overlay_family_value,
         "opening_frame_mode": opening_mode,
         "headline_card_presence": bool(ocr_summary.get("headline_card_presence")),
-        "proof_asset_presence": False,
+        "proof_asset_presence": proof_asset_presence if isinstance(proof_asset_presence, bool) else None,
         "screen_text_card_presence": bool(ocr_summary.get("headline_card_presence")),
-        "face_dominance": "unknown",
+        "face_dominance": None,
         "text_occupancy_band": ocr_summary.get("text_occupancy_band", "none"),
         "punch_in_frequency": punch_in,
         "zoom_crop_behavior": zoom_crop,
         "crop_reframe_behavior": zoom_crop,
         "broll_density": broll_density,
         "insert_density": "medium" if broll_density == "high" else "low",
-        "insert_types": _pick_vlm_value(vlm_labels, "insert_types") or (["broll"] if broll_density == "high" else ["none"]),
+        "insert_types": _pick_vlm_value(vlm_labels, "insert_types"),
         "insert_trigger": "explanation" if broll_density == "high" else "none",
         "effect_density": effect_density_value,
         "pattern_interrupt_types": pattern_interrupts,
         "shot_change_family": cut_density_band(technical_probe.get("cut_density_per_minute", 0.0)),
-        "transition_family": "hard_cut",
+        "transition_family": None,
         "edit_aggressiveness": "high" if technical_probe.get("cut_density_per_minute", 0.0) >= 24 else "medium",
         "silence_tightening_hint": silence_trim_level(
             technical_probe.get("silence_ratio", 0.0),
@@ -180,10 +181,205 @@ def build_content_evidence_v2(
         "self_containment": "high",
         "explanation_cadence": "rapid" if technical_probe.get("cut_density_per_minute", 0.0) >= 18 else "steady",
         "promise_clarity": "clear" if style_evidence["hook_family"] != "unknown" else "unclear",
-        "proof_arrival_ms": min(2500, technical_probe.get("duration_ms", 0)),
-        "payoff_arrival_ms": min(3500, technical_probe.get("duration_ms", 0)),
+        "proof_arrival_ms": None,
+        "payoff_arrival_ms": None,
         "opening_confusion_risk": "low" if style_evidence["hook_family"] != "unknown" else "medium",
     }
+
+
+def build_opening_packaging_v2(
+    *,
+    entry: Any,
+    technical_probe: dict[str, Any],
+    caption_evidence: dict[str, Any],
+    opening_timing: dict[str, Any],
+    opening_ocr_summary: dict[str, Any],
+    transcript_lead: str | None,
+    vlm_labels: dict[str, dict[str, Any]],
+    sampling_map: dict[str, Any],
+) -> dict[str, Any]:
+    opening_frames = sampling_map.get("zones", {}).get("opening_frames", [])
+    ocr_available = opening_ocr_summary.get("provider") not in {None, "disabled"}
+    opening_text = entry.hook_text or transcript_lead
+    opening_text_source = "manifest" if entry.hook_text else ("sidecar" if transcript_lead else "local")
+    proof_asset_from_vlm = _pick_vlm_value(vlm_labels, "proof_asset_presence")
+    proof_asset_value = proof_asset_from_vlm if isinstance(proof_asset_from_vlm, bool) else None
+
+    hook_family_value = hook_family(
+        hook_text=entry.hook_text,
+        transcript_lead=transcript_lead,
+        notes=entry.notes,
+    )
+    overlay_family_value = overlay_family(
+        notes=entry.notes,
+        subtitle_source=caption_evidence["subtitle_source"],
+        headline_card_presence=bool(opening_ocr_summary.get("headline_card_presence")),
+        burned_caption_present=bool(opening_ocr_summary.get("burned_caption_present")),
+    )
+    opening_frame_mode_value = opening_frame_mode(
+        notes=entry.notes,
+        burned_caption_present=bool(opening_ocr_summary.get("burned_caption_present")),
+        text_occupancy_band=opening_ocr_summary.get("text_occupancy_band", "none"),
+        proof_asset_presence=bool(proof_asset_value),
+    )
+    local_sticky_factors = sticky_factors(
+        hook_family_value=hook_family_value,
+        headline_card_presence=bool(opening_ocr_summary.get("headline_card_presence")),
+        burned_caption_present=bool(opening_ocr_summary.get("burned_caption_present")),
+        proof_asset_presence=bool(proof_asset_value),
+        cut_density_per_minute=technical_probe.get("cut_density_per_minute", 0.0),
+    )
+    sticky_from_vlm = _normalize_list(_pick_vlm_value(vlm_labels, "sticky_factors"))
+
+    format_local_value = None
+    format_local_source = "local"
+    if entry.style_family:
+        format_local_value = format_archetype(
+            notes=entry.notes,
+            transcript_text=entry.style_family,
+            style_family=entry.style_family,
+        )
+        format_local_source = "manifest"
+
+    packaging = {
+        "opening_window_ms": opening_timing["opening_window_ms"],
+        "opening_cut_count": technical_probe.get("opening_cut_count", 0),
+        "opening_silence_ms": opening_timing["opening_silence_ms"],
+        "opening_black_ms": opening_timing["opening_black_ms"],
+        "burned_caption_present": None,
+        "headline_card_presence": None,
+        "text_occupancy_band": None,
+        "safe_zone_bias": None,
+        "hook_family": None,
+        "opening_frame_mode": None,
+        "overlay_family": None,
+        "sticky_factors": None,
+        "insert_types": None,
+        "proof_asset_presence": None,
+        "format_archetype": None,
+        "evidence": {},
+    }
+
+    packaging["evidence"]["opening_window_ms"] = _evidence_record(
+        value=opening_timing["opening_window_ms"],
+        status="observed",
+        source="local",
+        confidence=1.0,
+        evidence_refs=opening_frames[:1],
+    )
+    packaging["evidence"]["opening_cut_count"] = _evidence_record(
+        value=technical_probe.get("opening_cut_count", 0),
+        status="observed",
+        source="local",
+        confidence=1.0,
+        evidence_refs=opening_frames[:2],
+    )
+    packaging["evidence"]["opening_silence_ms"] = _evidence_record(
+        value=opening_timing["opening_silence_ms"],
+        status="observed",
+        source="local",
+        confidence=1.0,
+        evidence_refs=[],
+    )
+    packaging["evidence"]["opening_black_ms"] = _evidence_record(
+        value=opening_timing["opening_black_ms"],
+        status="observed",
+        source="local",
+        confidence=1.0,
+        evidence_refs=[],
+    )
+    packaging["burned_caption_present"], packaging["evidence"]["burned_caption_present"] = _resolve_opening_signal(
+        local_value=bool(opening_ocr_summary.get("burned_caption_present")) if ocr_available else None,
+        local_status="observed" if ocr_available else "unknown",
+        local_source="ocr",
+        local_confidence=0.95 if ocr_available else 0.0,
+        local_refs=[block["frame_id"] for block in opening_ocr_summary.get("blocks", [])[:3]],
+    )
+    packaging["headline_card_presence"], packaging["evidence"]["headline_card_presence"] = _resolve_opening_signal(
+        local_value=bool(opening_ocr_summary.get("headline_card_presence")) if ocr_available else None,
+        local_status="observed" if ocr_available else "unknown",
+        local_source="ocr",
+        local_confidence=0.9 if ocr_available else 0.0,
+        local_refs=[block["frame_id"] for block in opening_ocr_summary.get("blocks", [])[:3]],
+    )
+    packaging["text_occupancy_band"], packaging["evidence"]["text_occupancy_band"] = _resolve_opening_signal(
+        local_value=opening_ocr_summary.get("text_occupancy_band") if ocr_available else None,
+        local_status="observed" if ocr_available else "unknown",
+        local_source="ocr",
+        local_confidence=0.9 if ocr_available else 0.0,
+        local_refs=[block["frame_id"] for block in opening_ocr_summary.get("blocks", [])[:3]],
+    )
+    packaging["safe_zone_bias"], packaging["evidence"]["safe_zone_bias"] = _resolve_opening_signal(
+        local_value=opening_ocr_summary.get("safe_zone_bias") if ocr_available else None,
+        local_status="observed" if ocr_available else "unknown",
+        local_source="ocr",
+        local_confidence=0.9 if ocr_available else 0.0,
+        local_refs=[block["frame_id"] for block in opening_ocr_summary.get("blocks", [])[:3]],
+    )
+    packaging["hook_family"], packaging["evidence"]["hook_family"] = _resolve_opening_signal(
+        local_value=hook_family_value if opening_text else None,
+        local_status="inferred" if opening_text else "unknown",
+        local_source=opening_text_source,
+        local_confidence=0.85 if entry.hook_text else (0.75 if transcript_lead else 0.0),
+        local_refs=opening_frames[:2],
+        vlm_value=_pick_vlm_value(vlm_labels, "hook_family"),
+        vlm_item=vlm_labels.get("hook_family"),
+    )
+    packaging["opening_frame_mode"], packaging["evidence"]["opening_frame_mode"] = _resolve_opening_signal(
+        local_value=opening_frame_mode_value,
+        local_status="inferred",
+        local_source="local",
+        local_confidence=0.7,
+        local_refs=opening_frames[:2],
+        vlm_value=_pick_vlm_value(vlm_labels, "opening_frame_mode"),
+        vlm_item=vlm_labels.get("opening_frame_mode"),
+    )
+    packaging["overlay_family"], packaging["evidence"]["overlay_family"] = _resolve_opening_signal(
+        local_value=overlay_family_value,
+        local_status="inferred",
+        local_source="local",
+        local_confidence=0.8,
+        local_refs=opening_frames[:2],
+        vlm_value=_pick_vlm_value(vlm_labels, "overlay_family"),
+        vlm_item=vlm_labels.get("overlay_family"),
+    )
+    packaging["sticky_factors"], packaging["evidence"]["sticky_factors"] = _resolve_opening_signal(
+        local_value=local_sticky_factors or None,
+        local_status="inferred" if local_sticky_factors else "unknown",
+        local_source="local",
+        local_confidence=0.65 if local_sticky_factors else 0.0,
+        local_refs=opening_frames[:3],
+        vlm_value=sticky_from_vlm or None,
+        vlm_item=vlm_labels.get("sticky_factors"),
+    )
+    packaging["insert_types"], packaging["evidence"]["insert_types"] = _resolve_opening_signal(
+        local_value=None,
+        local_status="unknown",
+        local_source="local",
+        local_confidence=0.0,
+        local_refs=[],
+        vlm_value=_normalize_list(_pick_vlm_value(vlm_labels, "insert_types")) or None,
+        vlm_item=vlm_labels.get("insert_types"),
+    )
+    packaging["proof_asset_presence"], packaging["evidence"]["proof_asset_presence"] = _resolve_opening_signal(
+        local_value=None,
+        local_status="unknown",
+        local_source="local",
+        local_confidence=0.0,
+        local_refs=[],
+        vlm_value=proof_asset_value,
+        vlm_item=vlm_labels.get("proof_asset_presence"),
+    )
+    packaging["format_archetype"], packaging["evidence"]["format_archetype"] = _resolve_opening_signal(
+        local_value=format_local_value,
+        local_status="inferred" if format_local_value else "unknown",
+        local_source=format_local_source,
+        local_confidence=0.8 if format_local_value else 0.0,
+        local_refs=opening_frames[:1],
+        vlm_value=_pick_vlm_value(vlm_labels, "format_archetype"),
+        vlm_item=vlm_labels.get("format_archetype"),
+    )
+    return packaging
 
 
 def build_reference_evidence_items(
@@ -401,8 +597,8 @@ def build_comparison_report_v2(
             "scoring_policy_version": baseline_benchmark_payload.get("scoring_policy_version"),
         },
         "candidate": {
-            "prompt_version": preset_bundle["recommended_prompt_version"],
-            "scoring_policy_version": preset_bundle["recommended_scoring_policy_version"],
+            "prompt_version": candidate_benchmark_payload.get("prompt_version"),
+            "scoring_policy_version": candidate_benchmark_payload.get("scoring_policy_version"),
         },
         "metric_deltas": metric_deltas,
         "improved_metrics": sorted(improved_metrics),
@@ -429,7 +625,7 @@ def build_summary_payload(
             hook_family_value=style_evidence["hook_family"],
             headline_card_presence=style_evidence["headline_card_presence"],
             burned_caption_present=ocr_summary.get("burned_caption_present", False),
-            proof_asset_presence=style_evidence["proof_asset_presence"],
+            proof_asset_presence=bool(style_evidence["proof_asset_presence"]),
             cut_density_per_minute=technical_probe.get("cut_density_per_minute", 0.0),
         )
     return {
@@ -465,3 +661,94 @@ def _pick_vlm_value(vlm_labels: dict[str, dict[str, Any]], label: str) -> Any:
     if not item:
         return None
     return item.get("value")
+
+
+def _resolve_opening_signal(
+    *,
+    local_value: Any,
+    local_status: str,
+    local_source: str,
+    local_confidence: float,
+    local_refs: list[str],
+    vlm_value: Any = None,
+    vlm_item: dict[str, Any] | None = None,
+) -> tuple[Any, dict[str, Any]]:
+    normalized_local = _normalized_signal_value(local_value)
+    normalized_vlm = _normalized_signal_value(vlm_value)
+    if normalized_local is None and normalized_vlm is None:
+        return None, _evidence_record(
+            value=None,
+            status="unknown",
+            source=local_source,
+            confidence=0.0,
+            evidence_refs=list(local_refs),
+        )
+    if normalized_local is None and normalized_vlm is not None:
+        return vlm_value, _evidence_record(
+            value=vlm_value,
+            status="observed" if (vlm_item or {}).get("confidence", 0.0) >= 0.75 else "inferred",
+            source="vlm",
+            confidence=float((vlm_item or {}).get("confidence", 0.0) or 0.0),
+            evidence_refs=[str(frame_id) for frame_id in (vlm_item or {}).get("evidence_frame_ids", [])],
+        )
+    status = local_status
+    evidence_refs = list(local_refs)
+    confidence = local_confidence
+    if normalized_vlm is not None:
+        evidence_refs.extend(str(frame_id) for frame_id in (vlm_item or {}).get("evidence_frame_ids", []))
+        if normalized_vlm != normalized_local:
+            status = "conflicted"
+        elif status == "unknown":
+            status = "observed"
+        confidence = max(local_confidence, float((vlm_item or {}).get("confidence", 0.0) or 0.0))
+    return local_value, _evidence_record(
+        value=local_value,
+        status=status,
+        source=local_source,
+        confidence=confidence,
+        evidence_refs=evidence_refs,
+    )
+
+
+def _evidence_record(
+    *,
+    value: Any,
+    status: str,
+    source: str,
+    confidence: float,
+    evidence_refs: list[str],
+) -> dict[str, Any]:
+    return {
+        "value": value,
+        "status": status,
+        "source": source,
+        "confidence": round(float(confidence or 0.0), 4),
+        "evidence_refs": _unique_refs(evidence_refs),
+    }
+
+
+def _normalize_list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if value is None:
+        return []
+    return [value]
+
+
+def _normalized_signal_value(value: Any) -> Any:
+    if isinstance(value, list):
+        return tuple(sorted(str(item) for item in value))
+    if isinstance(value, dict):
+        return tuple(sorted((str(key), str(item)) for key, item in value.items()))
+    return value
+
+
+def _unique_refs(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        ordered.append(value)
+    return ordered

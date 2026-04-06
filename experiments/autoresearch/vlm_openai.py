@@ -16,7 +16,7 @@ class FramePackClassifier(Protocol):
     model: str | None
     available: bool
 
-    def classify_reference(self, *, sampling_map: dict[str, Any], frame_root: Path) -> list[dict[str, Any]]:
+    def classify_reference(self, *, sampling_map: dict[str, Any], frame_root: Path) -> dict[str, Any]:
         ...
 
 
@@ -25,8 +25,16 @@ class DisabledFramePackClassifier:
     model = None
     available = True
 
-    def classify_reference(self, *, sampling_map: dict[str, Any], frame_root: Path) -> list[dict[str, Any]]:
-        return []
+    def classify_reference(self, *, sampling_map: dict[str, Any], frame_root: Path) -> dict[str, Any]:
+        return {
+            "labels": [],
+            "warnings": [
+                {
+                    "code": "vlm_provider_disabled",
+                    "message": "Sampled-frame VLM analysis is disabled for this run.",
+                }
+            ],
+        }
 
 
 class OpenAiFramePackClassifier:
@@ -38,9 +46,17 @@ class OpenAiFramePackClassifier:
         self.available = bool(api_key and model)
         self._timeout_s = timeout_s
 
-    def classify_reference(self, *, sampling_map: dict[str, Any], frame_root: Path) -> list[dict[str, Any]]:
+    def classify_reference(self, *, sampling_map: dict[str, Any], frame_root: Path) -> dict[str, Any]:
         if not self.available:
-            return []
+            return {
+                "labels": [],
+                "warnings": [
+                    {
+                        "code": "vlm_provider_disabled",
+                        "message": "OpenAI frame-pack classification is unavailable because the API key or model is missing.",
+                    }
+                ],
+            }
         content: list[dict[str, Any]] = [{"type": "input_text", "text": _build_instruction_text(sampling_map)}]
         reference_dir = frame_root / sampling_map["reference_id"]
         for frame in sampling_map.get("frames", []):
@@ -64,26 +80,53 @@ class OpenAiFramePackClassifier:
                 }
             )
         if len(content) <= 1:
-            return []
+            return {"labels": [], "warnings": []}
         payload = {
             "model": self.model,
             "input": [{"role": "user", "content": content}],
             "max_output_tokens": 900,
         }
-        with httpx.Client(timeout=self._timeout_s) as client:
-            response = client.post(
-                "https://api.openai.com/v1/responses",
-                headers={
-                    "Authorization": f"Bearer {self._api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-            )
-            response.raise_for_status()
-            response_payload = response.json()
+        try:
+            with httpx.Client(timeout=self._timeout_s) as client:
+                response = client.post(
+                    "https://api.openai.com/v1/responses",
+                    headers={
+                        "Authorization": f"Bearer {self._api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+                response.raise_for_status()
+                response_payload = response.json()
+        except Exception as exc:
+            return {
+                "labels": [],
+                "warnings": [
+                    {
+                        "code": "vlm_request_failed",
+                        "message": f"OpenAI frame-pack classification failed: {exc}",
+                    }
+                ],
+            }
         response_text = _extract_output_text(response_payload)
         parsed = _parse_json_object(response_text)
         labels = parsed.get("labels", []) if isinstance(parsed, dict) else []
+        warnings: list[dict[str, str]] = []
+        if response_text.strip() and not parsed:
+            warnings.append(
+                {
+                    "code": "vlm_parse_failed",
+                    "message": "OpenAI frame-pack response could not be parsed as JSON.",
+                }
+            )
+        elif not isinstance(labels, list):
+            warnings.append(
+                {
+                    "code": "vlm_parse_failed",
+                    "message": "OpenAI frame-pack response did not contain a valid labels array.",
+                }
+            )
+            labels = []
         normalized: list[dict[str, Any]] = []
         for item in labels:
             if not isinstance(item, dict):
@@ -95,10 +138,10 @@ class OpenAiFramePackClassifier:
                     "confidence": float(item.get("confidence", 0.0) or 0.0),
                     "why": item.get("why") or "",
                     "evidence_frame_ids": [str(frame_id) for frame_id in item.get("evidence_frame_ids", [])],
-                    "source": f"{self.provider}:{self.model}",
+                    "source": "vlm",
                 }
             )
-        return normalized
+        return {"labels": normalized, "warnings": warnings}
 
 
 def build_classifier(*, provider_name: str, model: str | None, api_key: str | None = None) -> FramePackClassifier:
@@ -121,10 +164,12 @@ def classify_sampling_maps(
 ) -> dict[str, Any]:
     references: list[dict[str, Any]] = []
     for sampling_map in sampling_maps:
+        result = classifier.classify_reference(sampling_map=sampling_map, frame_root=frame_root)
         references.append(
             {
                 "reference_id": sampling_map["reference_id"],
-                "labels": classifier.classify_reference(sampling_map=sampling_map, frame_root=frame_root),
+                "labels": result.get("labels", []),
+                "warnings": result.get("warnings", []),
             }
         )
     return {
@@ -142,7 +187,7 @@ def _build_instruction_text(sampling_map: dict[str, Any]) -> str:
             "Focus on packaging intelligence, not topic selection.",
             "Required JSON shape:",
             '{"labels":[{"label":"hook_family","value":"counterintuitive_claim","confidence":0.82,"evidence_frame_ids":["f0"],"why":"..."}]}',
-            "Allowed labels: opening_frame_mode, overlay_family, caption_style_family, hook_family, insert_types, format_archetype, pattern_interrupt_types, effect_density, sticky_factors.",
+            "Allowed labels: opening_frame_mode, overlay_family, caption_style_family, hook_family, insert_types, proof_asset_presence, format_archetype, pattern_interrupt_types, effect_density, sticky_factors.",
             f"Opening frame ids: {', '.join(sampling_map.get('zones', {}).get('opening_frames', [])) or 'none'}",
             f"Scene frame ids: {', '.join(sampling_map.get('zones', {}).get('scene_frames', [])) or 'none'}",
             f"End frame ids: {', '.join(sampling_map.get('zones', {}).get('end_frames', [])) or 'none'}",

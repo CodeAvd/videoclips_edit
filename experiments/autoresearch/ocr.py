@@ -195,12 +195,19 @@ def summarize_ocr_reference(
     reference_id: str,
     ocr_report: dict[str, Any],
     technical_probe: dict[str, Any],
+    frame_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     reference_payload = next(
         (item for item in ocr_report.get("references", []) if item.get("reference_id") == reference_id),
         {"frames": []},
     )
-    all_blocks = [block for frame in reference_payload.get("frames", []) for block in frame.get("blocks", [])]
+    allowed_frame_ids = set(frame_ids or [])
+    frames = [
+        frame
+        for frame in reference_payload.get("frames", [])
+        if not allowed_frame_ids or frame.get("frame_id") in allowed_frame_ids
+    ]
+    all_blocks = [block for frame in frames for block in frame.get("blocks", [])]
     occupancy_values: list[float] = []
     emphasis_patterns: set[str] = set()
     headline_card_presence = False
@@ -235,7 +242,7 @@ def summarize_ocr_reference(
                 "bbox": block["bbox"],
                 "confidence": block["confidence"],
             }
-            for frame in reference_payload.get("frames", [])
+            for frame in frames
             for block in frame.get("blocks", [])
         ],
     }

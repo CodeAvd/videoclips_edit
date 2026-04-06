@@ -293,6 +293,21 @@ def summarize_timing_stats(
     }
 
 
+def summarize_opening_window(
+    *,
+    technical_probe: dict[str, Any],
+    silence_ranges: list[dict[str, float]],
+    black_ranges: list[dict[str, float]],
+    window_end_ms: int = 4000,
+) -> dict[str, int]:
+    opening_window_ms = min(max(int(window_end_ms), 0), max(int(technical_probe.get("duration_ms", 0) or 0), 0))
+    return {
+        "opening_window_ms": opening_window_ms,
+        "opening_silence_ms": _range_overlap_total_ms(ranges=silence_ranges, window_end_ms=opening_window_ms),
+        "opening_black_ms": _range_overlap_total_ms(ranges=black_ranges, window_end_ms=opening_window_ms),
+    }
+
+
 def _build_body_scene_timestamps(*, scene_boundaries_ms: list[int], duration_ms: int) -> list[int]:
     if duration_ms <= 0:
         return [0]
@@ -350,6 +365,18 @@ def _build_high_change_windows(
 def _boundary_hits_range(boundary_ms: int, ranges: list[dict[str, float]]) -> bool:
     boundary_s = boundary_ms / 1000.0
     return any(item["start_s"] <= boundary_s <= item["end_s"] for item in ranges)
+
+
+def _range_overlap_total_ms(*, ranges: list[dict[str, float]], window_end_ms: int) -> int:
+    total_ms = 0
+    for item in ranges:
+        start_ms = max(int(round(float(item.get("start_s", 0.0)) * 1000)), 0)
+        end_ms = max(int(round(float(item.get("end_s", 0.0)) * 1000)), start_ms)
+        overlap_start = max(start_ms, 0)
+        overlap_end = min(end_ms, window_end_ms)
+        if overlap_end > overlap_start:
+            total_ms += overlap_end - overlap_start
+    return total_ms
 
 
 def _parse_ffmpeg_ranges(stderr: str, *, start_pattern: str, end_pattern: str) -> list[dict[str, float]]:

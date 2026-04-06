@@ -21,6 +21,7 @@ from experiments.autoresearch.sampling import (
     run_ffmpeg_blackdetect,
     run_ffmpeg_silencedetect,
     run_ffprobe_json,
+    summarize_opening_window,
     summarize_timing_stats,
 )
 from experiments.autoresearch.synthesis import (
@@ -28,6 +29,7 @@ from experiments.autoresearch.synthesis import (
     build_cluster_payload,
     build_comparison_report_v2,
     build_content_evidence_v2,
+    build_opening_packaging_v2,
     build_reference_evidence_items,
     build_style_evidence_v2,
     build_summary_payload,
@@ -218,13 +220,22 @@ def analyze_reference_collection(
         video_path = collection_dir / "videos" / entry.file_name
         ffprobe_payload = run_ffprobe_json(video_path=video_path, ffprobe_bin=ffprobe_bin)
         technical_probe = build_technical_probe(ffprobe_payload)
-        silence_ranges = _safe_ffmpeg_probe(
-            lambda: run_ffmpeg_silencedetect(video_path=video_path, ffmpeg_bin=ffmpeg_bin)
+        silence_ranges, silence_warning = _safe_ffmpeg_probe(
+            lambda: run_ffmpeg_silencedetect(video_path=video_path, ffmpeg_bin=ffmpeg_bin),
+            warning_code="silencedetect_fallback",
+            warning_message="silencedetect probe failed and was downgraded to an empty range set.",
         )
-        black_ranges = _safe_ffmpeg_probe(
-            lambda: run_ffmpeg_blackdetect(video_path=video_path, ffmpeg_bin=ffmpeg_bin)
+        black_ranges, black_warning = _safe_ffmpeg_probe(
+            lambda: run_ffmpeg_blackdetect(video_path=video_path, ffmpeg_bin=ffmpeg_bin),
+            warning_code="blackdetect_fallback",
+            warning_message="blackdetect probe failed and was downgraded to an empty range set.",
         )
         technical_probe.update(summarize_timing_stats(technical_probe=technical_probe, silence_ranges=silence_ranges))
+        opening_timing = summarize_opening_window(
+            technical_probe=technical_probe,
+            silence_ranges=silence_ranges,
+            black_ranges=black_ranges,
+        )
         sampling_map = build_sampling_map(
             reference_id=entry.reference_id,
             video_path=video_path,
@@ -233,14 +244,20 @@ def analyze_reference_collection(
             black_ranges=black_ranges,
         )
         sampling_maps.append(sampling_map)
+        subtitle_lines = _load_text_lines(collection_dir / entry.subtitle_file) if entry.subtitle_file else []
+        transcript_text = _load_text(collection_dir / entry.transcript_file) if entry.transcript_file else None
+        transcript_lead = _extract_hook_text(collection_dir=collection_dir, transcript_file=entry.transcript_file)
+        opening_text_hint = entry.hook_text or (subtitle_lines[0] if subtitle_lines else transcript_lead)
         base_payloads.append(
             {
                 "entry": entry,
                 "video_path": video_path,
                 "technical_probe": technical_probe,
-                "subtitle_lines": _load_text_lines(collection_dir / entry.subtitle_file) if entry.subtitle_file else [],
-                "transcript_text": _load_text(collection_dir / entry.transcript_file) if entry.transcript_file else None,
-                "transcript_lead": entry.hook_text or _extract_hook_text(collection_dir=collection_dir, transcript_file=entry.transcript_file),
+                "subtitle_lines": subtitle_lines,
+                "transcript_text": transcript_text,
+                "transcript_lead": opening_text_hint,
+                "opening_timing": opening_timing,
+                "warnings": [warning for warning in (silence_warning, black_warning) if warning],
             }
         )
     with _frame_root_context(output_dir=output_dir, should_materialize=(ocr_provider_name != "disabled" or vlm_provider_name != "disabled")) as frame_root:
@@ -268,6 +285,14 @@ def analyze_reference_collection(
             frame_root=frame_root or Path(collection_dir / ".refintel_frames"),
             classifier=vlm_classifier,
         )
+    report_warnings = _build_report_warnings(
+        requested_ocr_provider=ocr_provider_name,
+        resolved_ocr_provider=ocr_report.get("provider", "disabled"),
+        requested_vlm_provider=vlm_provider_name,
+        resolved_vlm_provider=vlm_report.get("provider", "disabled"),
+        vlm_model=vlm_model,
+        vlm_report=vlm_report,
+    )
     reports: list[dict[str, Any]] = []
     for payload, sampling_map in zip(base_payloads, sampling_maps):
         entry = payload["entry"]
@@ -276,6 +301,12 @@ def analyze_reference_collection(
             reference_id=entry.reference_id,
             ocr_report=ocr_report,
             technical_probe=technical_probe,
+        )
+        opening_ocr_summary = summarize_ocr_reference(
+            reference_id=entry.reference_id,
+            ocr_report=ocr_report,
+            technical_probe=technical_probe,
+            frame_ids=sampling_map["zones"]["opening_frames"],
         )
         vlm_labels = _vlm_label_map(vlm_report, entry.reference_id)
         caption_evidence = build_caption_evidence_v2(
@@ -288,7 +319,7 @@ def analyze_reference_collection(
             entry=entry,
             technical_probe=technical_probe,
             caption_evidence=caption_evidence,
-            ocr_summary=ocr_summary,
+            ocr_summary=opening_ocr_summary,
             transcript_lead=payload["transcript_lead"],
             vlm_labels=vlm_labels,
         )
@@ -298,6 +329,16 @@ def analyze_reference_collection(
             transcript_text=payload["transcript_text"],
             style_evidence=style_evidence,
             vlm_labels=vlm_labels,
+        )
+        opening_packaging = build_opening_packaging_v2(
+            entry=entry,
+            technical_probe=technical_probe,
+            caption_evidence=caption_evidence,
+            opening_timing=payload["opening_timing"],
+            opening_ocr_summary=opening_ocr_summary,
+            transcript_lead=payload["transcript_lead"],
+            vlm_labels=vlm_labels,
+            sampling_map=sampling_map,
         )
         evidence_items = build_reference_evidence_items(
             technical_probe=technical_probe,
@@ -322,15 +363,23 @@ def analyze_reference_collection(
                 "caption_evidence": caption_evidence,
                 "style_evidence": style_evidence,
                 "content_evidence": content_evidence,
+                "opening_packaging": opening_packaging,
                 "sampling": {
                     "opening_frames": sampling_map["zones"]["opening_frames"],
+                    "opening_window_ms": payload["opening_timing"]["opening_window_ms"],
                     "scene_windows": [window["window_id"] for window in sampling_map["zones"]["high_change_windows"]],
                     "end_frames": sampling_map["zones"]["end_frames"],
                 },
                 "ocr": {
+                    "provider": ocr_summary["provider"],
                     "burned_caption_present": ocr_summary["burned_caption_present"],
                     "blocks": ocr_summary["blocks"],
+                    "opening": {
+                        "burned_caption_present": opening_ocr_summary["burned_caption_present"],
+                        "blocks": opening_ocr_summary["blocks"],
+                    },
                 },
+                "warnings": [*payload["warnings"], *_vlm_reference_warnings(vlm_report, entry.reference_id)],
                 "evidence": evidence_items,
                 "summary": summary_payload,
             }
@@ -346,6 +395,7 @@ def analyze_reference_collection(
             "source_collection": collection_dir.name,
             "references": sampling_maps,
         },
+        "warnings": report_warnings,
         "ocr_report": ocr_report,
         "vlm_report": vlm_report,
         "references": reports,
@@ -400,12 +450,14 @@ def build_comparison_report(
     baseline_benchmark_payload: dict[str, Any],
     candidate_benchmark_payload: dict[str, Any],
 ) -> dict[str, Any]:
+    preset_bundle_payload = preset_bundle.to_dict()
     _validate_benchmark_payload_compatibility(
+        preset_bundle=preset_bundle_payload,
         baseline_benchmark_payload=baseline_benchmark_payload,
         candidate_benchmark_payload=candidate_benchmark_payload,
     )
     return build_comparison_report_v2(
-        preset_bundle=preset_bundle.to_dict(),
+        preset_bundle=preset_bundle_payload,
         baseline_benchmark_payload=baseline_benchmark_payload,
         candidate_benchmark_payload=candidate_benchmark_payload,
     )
@@ -540,7 +592,7 @@ def _extract_hook_text(*, collection_dir: Path, transcript_file: str | None) -> 
 def _vlm_label_map(vlm_report: dict[str, Any], reference_id: str) -> dict[str, dict[str, Any]]:
     reference_payload = next(
         (item for item in vlm_report.get("references", []) if item.get("reference_id") == reference_id),
-        {"labels": []},
+        {"labels": [], "warnings": []},
     )
     labels: dict[str, dict[str, Any]] = {}
     for item in reference_payload.get("labels", []):
@@ -555,6 +607,7 @@ def _vlm_label_map(vlm_report: dict[str, Any], reference_id: str) -> dict[str, d
 
 def _validate_benchmark_payload_compatibility(
     *,
+    preset_bundle: dict[str, Any],
     baseline_benchmark_payload: dict[str, Any],
     candidate_benchmark_payload: dict[str, Any],
 ) -> None:
@@ -562,13 +615,79 @@ def _validate_benchmark_payload_compatibility(
         raise BenchmarkComparisonError("Benchmark payloads must target the same eval_set_id.")
     if set(baseline_benchmark_payload["aggregate_metrics"]) != set(candidate_benchmark_payload["aggregate_metrics"]):
         raise BenchmarkComparisonError("Benchmark payloads must expose the same aggregate metrics.")
+    if candidate_benchmark_payload.get("prompt_version") != preset_bundle["recommended_prompt_version"]:
+        raise BenchmarkComparisonError("Candidate benchmark prompt_version must match the preset bundle recommendation.")
+    if candidate_benchmark_payload.get("scoring_policy_version") != preset_bundle["recommended_scoring_policy_version"]:
+        raise BenchmarkComparisonError(
+            "Candidate benchmark scoring_policy_version must match the preset bundle recommendation."
+        )
 
 
-def _safe_ffmpeg_probe(func: Any) -> list[dict[str, float]]:
+def _safe_ffmpeg_probe(
+    func: Any,
+    *,
+    warning_code: str,
+    warning_message: str,
+) -> tuple[list[dict[str, float]], dict[str, Any] | None]:
     try:
-        return func()
+        return func(), None
     except Exception:
-        return []
+        return [], {"code": warning_code, "message": warning_message}
+
+
+def _vlm_reference_warnings(vlm_report: dict[str, Any], reference_id: str) -> list[dict[str, Any]]:
+    reference_payload = next(
+        (item for item in vlm_report.get("references", []) if item.get("reference_id") == reference_id),
+        {"warnings": []},
+    )
+    return list(reference_payload.get("warnings", []))
+
+
+def _build_report_warnings(
+    *,
+    requested_ocr_provider: str,
+    resolved_ocr_provider: str,
+    requested_vlm_provider: str,
+    resolved_vlm_provider: str,
+    vlm_model: str | None,
+    vlm_report: dict[str, Any],
+) -> list[dict[str, Any]]:
+    warnings: list[dict[str, Any]] = []
+    if requested_ocr_provider != "disabled" and resolved_ocr_provider == "disabled":
+        warnings.append(
+            {
+                "code": "ocr_provider_downgraded",
+                "message": f"OCR provider '{requested_ocr_provider}' was unavailable and the run downgraded to disabled OCR.",
+            }
+        )
+    if resolved_vlm_provider == "disabled":
+        if requested_vlm_provider == "disabled":
+            warnings.append(
+                {
+                    "code": "vlm_provider_disabled",
+                    "message": "Sampled-frame VLM analysis was disabled for this run.",
+                }
+            )
+        else:
+            warnings.append(
+                {
+                    "code": "vlm_provider_disabled",
+                    "message": f"Requested VLM provider '{requested_vlm_provider}:{vlm_model}' could not be activated; the run continued with VLM disabled.",
+                }
+            )
+    for reference in vlm_report.get("references", []):
+        for warning in reference.get("warnings", []):
+            if warning.get("code") == "vlm_parse_failed":
+                warnings.append(dict(warning))
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for warning in warnings:
+        key = (str(warning.get("code")), str(warning.get("message")))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(warning)
+    return deduped
 
 
 class _frame_root_context:

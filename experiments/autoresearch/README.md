@@ -70,6 +70,12 @@ Each run writes:
 - `preset_bundle.json`
 - `comparison_report.json` when both benchmark payloads already exist
 
+`reference_style_report.json` now includes:
+
+- `opening_packaging` scoped to the opening `0-4000ms` window
+- per-label `opening_packaging.evidence` records with `value`, `status`, `source`, `confidence`, and `evidence_refs`
+- explicit `warnings` when probe or provider paths degrade
+
 ## Usage
 
 From `backend/`:
@@ -95,5 +101,7 @@ This lane is intentionally offline-only:
 - it may recommend `prompt_version` and `scoring_policy_version`;
 - it may synthesize render policy hints such as `caption_style`, `crop_mode`, `silence_trim_level`, and `broll_mode`;
 - it may emit `reference_manifest.lock.json`, `reference_sampling_map.json`, and `reference_ocr_report.json` as intermediate artifacts;
+- it may use OCR and sampled-frame VLM analysis only when explicitly enabled; VLM remains opt-in and disabled by default;
+- local deterministic timing/layout evidence remains authoritative over VLM when signals conflict;
 - it must not mutate production defaults automatically.
 - if a preset touches ranking-adjacent policy, it must be compared against a frozen eval set and persisted comparison artifact before any enablement decision.

@@ -1,3 +1,4 @@
+import csv
 import json
 from pathlib import Path
 import sys
@@ -10,6 +11,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
+import experiments.autoresearch.reference_intelligence as reference_intelligence_module  # noqa: E402
+from experiments.autoresearch.ocr import DisabledOcrProvider, StaticOcrProvider  # noqa: E402
 from experiments.autoresearch.reference_intelligence import (  # noqa: E402
     BenchmarkComparisonError,
     ReferenceManifestError,
@@ -75,6 +78,29 @@ def build_reference_collection(tmp_path: Path) -> Path:
     return collection_dir
 
 
+def write_csv_manifest(collection_dir: Path, records: list[dict[str, object]]) -> None:
+    fieldnames = [
+        "reference_id",
+        "file_name",
+        "channel_or_source",
+        "theme",
+        "language",
+        "platform",
+        "notes",
+        "style_family",
+        "why_reference",
+        "subtitle_file",
+        "transcript_file",
+        "hook_text",
+        "cta_text",
+    ]
+    with (collection_dir / "manifest.csv").open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for record in records:
+            writer.writerow(record)
+
+
 def test_reference_manifest_rejects_missing_files(tmp_path: Path) -> None:
     collection_dir = tmp_path / "references" / "broken-pack"
     (collection_dir / "videos").mkdir(parents=True)
@@ -99,6 +125,65 @@ def test_reference_manifest_rejects_missing_files(tmp_path: Path) -> None:
         load_reference_manifest(collection_dir)
 
 
+def test_reference_manifest_supports_csv(tmp_path: Path) -> None:
+    collection_dir = build_reference_collection(tmp_path)
+    manifest_payload = json.loads((collection_dir / "manifest.json").read_text(encoding="utf-8"))
+    write_csv_manifest(collection_dir, manifest_payload["references"])
+    (collection_dir / "manifest.json").unlink()
+
+    entries = load_reference_manifest(collection_dir)
+
+    assert [entry.reference_id for entry in entries] == ["ref-001", "ref-002"]
+
+
+def test_reference_manifest_rejects_unknown_fields(tmp_path: Path) -> None:
+    collection_dir = build_reference_collection(tmp_path)
+    manifest_payload = json.loads((collection_dir / "manifest.json").read_text(encoding="utf-8"))
+    manifest_payload["references"][0]["mystery_field"] = "nope"
+    (collection_dir / "manifest.json").write_text(json.dumps(manifest_payload), encoding="utf-8")
+
+    with pytest.raises(ReferenceManifestError, match="unsupported fields"):
+        load_reference_manifest(collection_dir)
+
+
+def test_reference_manifest_rejects_duplicate_reference_id(tmp_path: Path) -> None:
+    collection_dir = build_reference_collection(tmp_path)
+    manifest_payload = json.loads((collection_dir / "manifest.json").read_text(encoding="utf-8"))
+    manifest_payload["references"][1]["reference_id"] = "ref-001"
+    (collection_dir / "manifest.json").write_text(json.dumps(manifest_payload), encoding="utf-8")
+
+    with pytest.raises(ReferenceManifestError, match="Duplicate reference_id"):
+        load_reference_manifest(collection_dir)
+
+
+def test_reference_manifest_rejects_missing_required_values(tmp_path: Path) -> None:
+    collection_dir = build_reference_collection(tmp_path)
+    manifest_payload = json.loads((collection_dir / "manifest.json").read_text(encoding="utf-8"))
+    manifest_payload["references"][0]["language"] = ""
+    (collection_dir / "manifest.json").write_text(json.dumps(manifest_payload), encoding="utf-8")
+
+    with pytest.raises(ReferenceManifestError, match="missing required values"):
+        load_reference_manifest(collection_dir)
+
+
+def test_reference_manifest_requires_videos_directory(tmp_path: Path) -> None:
+    collection_dir = build_reference_collection(tmp_path)
+    for child in (collection_dir / "videos").iterdir():
+        child.unlink()
+    (collection_dir / "videos").rmdir()
+
+    with pytest.raises(ReferenceManifestError, match="videos/ directory"):
+        load_reference_manifest(collection_dir)
+
+
+def test_reference_manifest_rejects_missing_sidecars(tmp_path: Path) -> None:
+    collection_dir = build_reference_collection(tmp_path)
+    (collection_dir / "transcripts" / "short-02.txt").unlink()
+
+    with pytest.raises(ReferenceManifestError, match="Sidecar file"):
+        load_reference_manifest(collection_dir)
+
+
 def test_analyze_reference_collection_builds_report_and_clusters(tmp_path: Path) -> None:
     collection_dir = build_reference_collection(tmp_path)
 
@@ -112,6 +197,7 @@ def test_analyze_reference_collection_builds_report_and_clusters(tmp_path: Path)
     assert report["sampling_payload"]["source_collection"] == "canonical-pack"
     assert len(report["sampling_payload"]["references"]) == 2
     assert report["ocr_report"]["provider"] == "disabled"
+    assert any(warning["code"] == "vlm_provider_disabled" for warning in report["warnings"])
     languages = {item["reference"]["language"] for item in report["references"]}
     assert languages == {"en", "ru"}
 
@@ -121,11 +207,91 @@ def test_analyze_reference_collection_builds_report_and_clusters(tmp_path: Path)
     assert first_report["caption_evidence"]["subtitle_presence"] is True
     assert first_report["caption_evidence"]["subtitle_source"] == "sidecar"
     assert first_report["style_evidence"]["overlay_usage"] == "heavy"
+    assert first_report["style_evidence"]["face_dominance"] is None
+    assert first_report["style_evidence"]["transition_family"] is None
+    assert first_report["content_evidence"]["proof_arrival_ms"] is None
+    assert first_report["content_evidence"]["payoff_arrival_ms"] is None
     assert first_report["sampling"]["opening_frames"]
+    assert first_report["opening_packaging"]["opening_window_ms"] == 4000
+    assert first_report["opening_packaging"]["evidence"]["opening_window_ms"]["status"] == "observed"
+    assert first_report["opening_packaging"]["burned_caption_present"] is None
+    assert first_report["opening_packaging"]["evidence"]["burned_caption_present"]["status"] == "unknown"
+    assert first_report["opening_packaging"]["proof_asset_presence"] is None
+    assert first_report["opening_packaging"]["evidence"]["proof_asset_presence"]["status"] == "unknown"
     assert first_report["summary"]["format_archetype"] == "single_talking_head"
     assert isinstance(report["clusters"], dict)
     assert "daily-news" in report["clusters"]
     assert report["cluster_payload"]["clusters"]
+
+
+def test_opening_ocr_contract_uses_only_opening_frames(tmp_path: Path, monkeypatch) -> None:
+    collection_dir = build_reference_collection(tmp_path)
+
+    monkeypatch.setattr(
+        reference_intelligence_module,
+        "build_ocr_provider",
+        lambda provider_name, *, tesseract_bin="tesseract": StaticOcrProvider(
+            {
+                "f0": [{"text": "STOP DOING THIS", "confidence": 0.99, "bbox": [0, 160, 280, 60]}],
+                "f6": [{"text": "LATE BODY TEXT", "confidence": 0.85, "bbox": [0, 40, 220, 40]}],
+            }
+        ),
+    )
+
+    report = analyze_reference_collection(
+        collection_dir,
+        output_dir=collection_dir / "outputs",
+        ocr_provider_name="auto",
+    )
+
+    first_report = report["references"][0]
+    opening_blocks = first_report["ocr"]["opening"]["blocks"]
+
+    assert first_report["opening_packaging"]["burned_caption_present"] is True
+    assert first_report["opening_packaging"]["headline_card_presence"] is True
+    assert opening_blocks
+    assert {block["frame_id"] for block in opening_blocks} == {"f0"}
+    assert all(block["frame_id"] in first_report["sampling"]["opening_frames"] for block in opening_blocks)
+
+
+def test_degraded_probe_and_provider_paths_emit_warnings(tmp_path: Path, monkeypatch) -> None:
+    collection_dir = build_reference_collection(tmp_path)
+
+    monkeypatch.setattr(reference_intelligence_module, "run_ffmpeg_silencedetect", lambda **_: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(reference_intelligence_module, "run_ffmpeg_blackdetect", lambda **_: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(reference_intelligence_module, "build_ocr_provider", lambda provider_name, *, tesseract_bin="tesseract": DisabledOcrProvider())
+
+    class ParseFailureClassifier:
+        provider = "openai"
+        model = "gpt-test"
+        available = True
+
+        def classify_reference(self, *, sampling_map, frame_root):
+            return {
+                "labels": [],
+                "warnings": [{"code": "vlm_parse_failed", "message": "mocked parse failure"}],
+            }
+
+    monkeypatch.setattr(
+        reference_intelligence_module,
+        "build_classifier",
+        lambda *, provider_name, model, api_key=None: ParseFailureClassifier(),
+    )
+
+    report = analyze_reference_collection(
+        collection_dir,
+        output_dir=collection_dir / "outputs",
+        ocr_provider_name="auto",
+        vlm_provider_name="openai",
+        vlm_model="gpt-test",
+    )
+
+    warning_codes = {warning["code"] for warning in report["warnings"]}
+    reference_warning_codes = {warning["code"] for warning in report["references"][0]["warnings"]}
+
+    assert "ocr_provider_downgraded" in warning_codes
+    assert "vlm_parse_failed" in warning_codes
+    assert {"silencedetect_fallback", "blackdetect_fallback"} <= reference_warning_codes
 
 
 def test_synthesize_preset_bundle_is_deterministic_and_analysis_only(tmp_path: Path) -> None:
@@ -184,7 +350,7 @@ def test_write_reference_outputs_emits_new_artifacts(tmp_path: Path) -> None:
             "benchmark_run_id": "run-candidate",
             "eval_set_id": "eval-1",
             "prompt_version": "v1-style",
-            "scoring_policy_version": "preset-v2",
+            "scoring_policy_version": "v1-style",
             "aggregate_metrics": {
                 "accepted_coverage_top_5": 0.5,
                 "accepted_coverage_top_10": 0.7,
@@ -212,6 +378,7 @@ def test_write_reference_outputs_emits_new_artifacts(tmp_path: Path) -> None:
     assert expected_files == {path.name for path in output_dir.iterdir()}
     style_payload = json.loads((output_dir / "reference_style_report.json").read_text(encoding="utf-8"))
     assert style_payload["schema_version"] == "refintel.v2"
+    assert "opening_packaging" in style_payload["references"][0]
 
 
 def test_build_comparison_report_respects_metric_direction() -> None:
@@ -248,7 +415,7 @@ def test_build_comparison_report_respects_metric_direction() -> None:
         "benchmark_run_id": "run-candidate",
         "eval_set_id": "eval-1",
         "prompt_version": "v1",
-        "scoring_policy_version": "preset-v2",
+        "scoring_policy_version": "v2",
         "aggregate_metrics": {
             "accepted_coverage_top_5": 0.5,
             "accepted_coverage_top_10": 0.7,
@@ -271,6 +438,8 @@ def test_build_comparison_report_respects_metric_direction() -> None:
     assert report["eligible_surface"] == "ranking"
     assert report["promotion_state"] == "ready_for_review"
     assert report["metric_deltas"]["rejected_intrusion_top_5"]["direction"] == "lower_is_better"
+    assert report["candidate"]["prompt_version"] == "v1"
+    assert report["candidate"]["scoring_policy_version"] == "v2"
 
 
 def test_build_comparison_report_rejects_mismatched_eval_sets(tmp_path: Path) -> None:
@@ -299,6 +468,66 @@ def test_build_comparison_report_rejects_mismatched_eval_sets(tmp_path: Path) ->
         )
 
 
+def test_build_comparison_report_rejects_mismatched_prompt_version(tmp_path: Path) -> None:
+    collection_dir = build_reference_collection(tmp_path)
+    report = analyze_reference_collection(collection_dir)
+    preset_bundle = synthesize_preset_bundle(
+        reference_report=report,
+        preset_name="candidate-a",
+        recommended_prompt_version="v1",
+        recommended_scoring_policy_version="v2",
+    )
+
+    with pytest.raises(BenchmarkComparisonError, match="prompt_version"):
+        build_comparison_report(
+            preset_bundle=preset_bundle,
+            baseline_benchmark_payload={
+                "benchmark_run_id": "run-baseline",
+                "eval_set_id": "eval-1",
+                "prompt_version": "v0",
+                "scoring_policy_version": "v0",
+                "aggregate_metrics": {"accepted_coverage_top_5": 0.4},
+            },
+            candidate_benchmark_payload={
+                "benchmark_run_id": "run-candidate",
+                "eval_set_id": "eval-1",
+                "prompt_version": "v2",
+                "scoring_policy_version": "v2",
+                "aggregate_metrics": {"accepted_coverage_top_5": 0.5},
+            },
+        )
+
+
+def test_build_comparison_report_rejects_mismatched_scoring_policy_version(tmp_path: Path) -> None:
+    collection_dir = build_reference_collection(tmp_path)
+    report = analyze_reference_collection(collection_dir)
+    preset_bundle = synthesize_preset_bundle(
+        reference_report=report,
+        preset_name="candidate-a",
+        recommended_prompt_version="v1",
+        recommended_scoring_policy_version="v2",
+    )
+
+    with pytest.raises(BenchmarkComparisonError, match="scoring_policy_version"):
+        build_comparison_report(
+            preset_bundle=preset_bundle,
+            baseline_benchmark_payload={
+                "benchmark_run_id": "run-baseline",
+                "eval_set_id": "eval-1",
+                "prompt_version": "v1",
+                "scoring_policy_version": "v0",
+                "aggregate_metrics": {"accepted_coverage_top_5": 0.4},
+            },
+            candidate_benchmark_payload={
+                "benchmark_run_id": "run-candidate",
+                "eval_set_id": "eval-1",
+                "prompt_version": "v1",
+                "scoring_policy_version": "v3",
+                "aggregate_metrics": {"accepted_coverage_top_5": 0.5},
+            },
+        )
+
+
 def test_render_only_preset_stays_blocked_pre_m3(tmp_path: Path) -> None:
     collection_dir = build_reference_collection(tmp_path)
     report = analyze_reference_collection(collection_dir)
@@ -314,6 +543,8 @@ def test_render_only_preset_stays_blocked_pre_m3(tmp_path: Path) -> None:
         baseline_benchmark_payload={
             "benchmark_run_id": "run-baseline",
             "eval_set_id": "eval-1",
+            "prompt_version": "v1",
+            "scoring_policy_version": "v1",
             "aggregate_metrics": {
                 "accepted_coverage_top_5": 0.4,
                 "accepted_coverage_top_10": 0.6,
@@ -323,6 +554,8 @@ def test_render_only_preset_stays_blocked_pre_m3(tmp_path: Path) -> None:
         candidate_benchmark_payload={
             "benchmark_run_id": "run-candidate",
             "eval_set_id": "eval-1",
+            "prompt_version": "v1",
+            "scoring_policy_version": "preset-render",
             "aggregate_metrics": {
                 "accepted_coverage_top_5": 0.45,
                 "accepted_coverage_top_10": 0.62,
