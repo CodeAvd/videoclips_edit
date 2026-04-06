@@ -4,11 +4,11 @@ import pytest
 from sqlalchemy import inspect, select
 
 from app.core.errors import AppError
-from app.models.enums import CandidateLabelValue, EvalSetStatus
+from app.models.enums import ArtifactKind, CandidateLabelValue, EvalSetStatus
 from app.models.job import ArtifactObject, BenchmarkResult
 from app.services import eval_harness
 from app.services.storage import get_storage_service
-from flow_helpers import run_job_pipeline_smoke
+from flow_helpers import create_uploaded_source_video, run_job_pipeline_smoke
 
 
 async def test_eval_tables_exist_in_metadata(session_factory) -> None:
@@ -119,6 +119,167 @@ async def test_pre_m3_benchmark_gate_requires_comparison_artifact(session_factor
             prompt_version="v1",
             scoring_policy_version="v1",
             artifact_id=None,
+        )
+        await session.commit()
+        eval_set_id = eval_set.id
+
+    async with session_factory() as session:
+        with pytest.raises(AppError) as exc_info:
+            await eval_harness.assert_pre_m3_benchmark_ready(
+                session,
+                eval_set_id=eval_set_id,
+                prompt_version="v1",
+                scoring_policy_version="v1",
+            )
+
+    assert exc_info.value.code == "benchmark_gate_unmet"
+
+
+async def test_run_benchmark_rejects_non_frozen_eval_set(session_factory) -> None:
+    async with session_factory() as session:
+        eval_set = await eval_harness.create_eval_set(
+            session,
+            name="Draft Benchmark",
+            status=EvalSetStatus.draft,
+        )
+        await session.commit()
+
+        with pytest.raises(AppError) as exc_info:
+            await eval_harness.run_benchmark(
+                session,
+                eval_set_id=eval_set.id,
+                prompt_version="v1",
+                scoring_policy_version="v1",
+            )
+
+    assert exc_info.value.code == "eval_set_not_frozen"
+
+
+async def test_run_benchmark_rejects_empty_eval_set(session_factory) -> None:
+    async with session_factory() as session:
+        eval_set = await eval_harness.create_eval_set(
+            session,
+            name="Empty Frozen Benchmark",
+            status=EvalSetStatus.frozen,
+        )
+        await session.commit()
+
+        with pytest.raises(AppError) as exc_info:
+            await eval_harness.run_benchmark(
+                session,
+                eval_set_id=eval_set.id,
+                prompt_version="v1",
+                scoring_policy_version="v1",
+            )
+
+    assert exc_info.value.code == "eval_set_empty"
+
+
+async def test_run_benchmark_requires_labels_for_each_member(
+    client,
+    actor_headers,
+    session_factory,
+    storage_root,
+    monkeypatch,
+) -> None:
+    context = await run_job_pipeline_smoke(
+        client=client,
+        actor_headers=actor_headers,
+        session_factory=session_factory,
+        storage_root=storage_root,
+        monkeypatch=monkeypatch,
+    )
+    source_video_id = UUID(str(context["source_video_id"]))
+
+    async with session_factory() as session:
+        eval_set = await eval_harness.create_eval_set(
+            session,
+            name="Frozen Without Labels",
+            status=EvalSetStatus.frozen,
+        )
+        await eval_harness.add_eval_set_member(
+            session,
+            eval_set_id=eval_set.id,
+            source_video_id=source_video_id,
+        )
+        await session.commit()
+
+        with pytest.raises(AppError) as exc_info:
+            await eval_harness.run_benchmark(
+                session,
+                eval_set_id=eval_set.id,
+                prompt_version="v1",
+                scoring_policy_version="v1",
+            )
+
+    assert exc_info.value.code == "benchmark_labels_missing"
+
+
+async def test_run_benchmark_requires_eligible_job(
+    client,
+    actor_headers,
+    session_factory,
+) -> None:
+    _, source_video_id = await create_uploaded_source_video(client, actor_headers)
+    source_video_uuid = UUID(source_video_id)
+
+    async with session_factory() as session:
+        eval_set = await eval_harness.create_eval_set(
+            session,
+            name="Frozen Without Job",
+            status=EvalSetStatus.frozen,
+        )
+        await eval_harness.add_eval_set_member(
+            session,
+            eval_set_id=eval_set.id,
+            source_video_id=source_video_uuid,
+        )
+        await eval_harness.store_candidate_label(
+            session,
+            eval_set_id=eval_set.id,
+            source_video_id=source_video_uuid,
+            start_ms=0,
+            end_ms=1000,
+            label=CandidateLabelValue.accept,
+            actor_ref="reviewer-1",
+            notes="Benchmark anchor.",
+        )
+        await session.commit()
+
+        with pytest.raises(AppError) as exc_info:
+            await eval_harness.run_benchmark(
+                session,
+                eval_set_id=eval_set.id,
+                prompt_version="v1",
+                scoring_policy_version="v1",
+            )
+
+    assert exc_info.value.code == "benchmark_job_missing"
+
+
+async def test_pre_m3_benchmark_gate_requires_persisted_results(session_factory) -> None:
+    async with session_factory() as session:
+        eval_set = await eval_harness.create_eval_set(
+            session,
+            name="Benchmark Without Results",
+            status=EvalSetStatus.frozen,
+        )
+        artifact = ArtifactObject(
+            storage_key="benchmarks/mock/comparison.json",
+            kind=ArtifactKind.stage_artifact,
+            sha256="deadbeef",
+            size_bytes=128,
+            mime_type="application/json",
+            metadata_jsonb={"artifact_type": "benchmark_comparison"},
+        )
+        session.add(artifact)
+        await session.flush()
+        await eval_harness.create_benchmark_run(
+            session,
+            eval_set_id=eval_set.id,
+            prompt_version="v1",
+            scoring_policy_version="v1",
+            artifact_id=artifact.id,
         )
         await session.commit()
         eval_set_id = eval_set.id
