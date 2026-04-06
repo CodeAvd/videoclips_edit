@@ -6,8 +6,6 @@ import os
 from pathlib import Path
 from typing import Any, Protocol
 
-import httpx
-
 from experiments.autoresearch.taxonomy import SCHEMA_VERSION
 
 
@@ -87,6 +85,8 @@ class OpenAiFramePackClassifier:
             "max_output_tokens": 900,
         }
         try:
+            import httpx
+
             with httpx.Client(timeout=self._timeout_s) as client:
                 response = client.post(
                     "https://api.openai.com/v1/responses",

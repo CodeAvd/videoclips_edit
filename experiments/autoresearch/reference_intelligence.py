@@ -18,7 +18,9 @@ from experiments.autoresearch.sampling import (
     build_sampling_map,
     build_technical_probe,
     materialize_sampling_frames,
+    resolve_reference_video_path,
     run_ffmpeg_blackdetect,
+    run_ffmpeg_scene_changes,
     run_ffmpeg_silencedetect,
     run_ffprobe_json,
     summarize_opening_window,
@@ -181,12 +183,12 @@ def load_reference_manifest(collection_dir: Path) -> list[ReferenceManifestEntry
 
 
 def _validate_manifest_files(*, collection_dir: Path, entries: list[ReferenceManifestEntry]) -> None:
-    videos_dir = collection_dir / "videos"
-    if not videos_dir.exists():
-        raise ReferenceManifestError(f"Collection '{collection_dir}' must contain a videos/ directory.")
     for entry in entries:
-        if not (videos_dir / entry.file_name).exists():
-            raise ReferenceManifestError(f"Manifest file '{entry.file_name}' does not exist under {videos_dir}.")
+        video_path = resolve_reference_video_path(collection_dir=collection_dir, file_name=entry.file_name)
+        if not video_path.exists():
+            raise ReferenceManifestError(
+                f"Manifest file '{entry.file_name}' does not exist under {collection_dir / 'videos'} or {collection_dir}."
+            )
         for sidecar_name in (entry.subtitle_file, entry.transcript_file):
             if sidecar_name and not (collection_dir / sidecar_name).exists():
                 raise ReferenceManifestError(f"Sidecar file '{sidecar_name}' was declared but not found.")
@@ -217,9 +219,17 @@ def analyze_reference_collection(
     base_payloads: list[dict[str, Any]] = []
     sampling_maps: list[dict[str, Any]] = []
     for entry in entries:
-        video_path = collection_dir / "videos" / entry.file_name
+        video_path = resolve_reference_video_path(collection_dir=collection_dir, file_name=entry.file_name)
         ffprobe_payload = run_ffprobe_json(video_path=video_path, ffprobe_bin=ffprobe_bin)
-        technical_probe = build_technical_probe(ffprobe_payload)
+        scene_change_timestamps_ms, scene_change_warning = _safe_scene_change_probe(
+            video_path=video_path,
+            ffmpeg_bin=ffmpeg_bin,
+            ffprobe_payload=ffprobe_payload,
+        )
+        technical_probe = build_technical_probe(
+            ffprobe_payload,
+            scene_change_timestamps_ms=scene_change_timestamps_ms,
+        )
         silence_ranges, silence_warning = _safe_ffmpeg_probe(
             lambda: run_ffmpeg_silencedetect(video_path=video_path, ffmpeg_bin=ffmpeg_bin),
             warning_code="silencedetect_fallback",
@@ -257,7 +267,7 @@ def analyze_reference_collection(
                 "transcript_text": transcript_text,
                 "transcript_lead": opening_text_hint,
                 "opening_timing": opening_timing,
-                "warnings": [warning for warning in (silence_warning, black_warning) if warning],
+                "warnings": [warning for warning in (scene_change_warning, silence_warning, black_warning) if warning],
             }
         )
     with _frame_root_context(output_dir=output_dir, should_materialize=(ocr_provider_name != "disabled" or vlm_provider_name != "disabled")) as frame_root:
@@ -633,6 +643,33 @@ def _safe_ffmpeg_probe(
         return func(), None
     except Exception:
         return [], {"code": warning_code, "message": warning_message}
+
+
+def _safe_scene_change_probe(
+    *,
+    video_path: Path,
+    ffmpeg_bin: str,
+    ffprobe_payload: dict[str, Any],
+) -> tuple[list[int], dict[str, Any] | None]:
+    try:
+        return run_ffmpeg_scene_changes(video_path=video_path, ffmpeg_bin=ffmpeg_bin), None
+    except Exception:
+        fallback_timestamps: list[int] = []
+        for frame in ffprobe_payload.get("frames", []):
+            if int(frame.get("key_frame", 0) or 0) != 1:
+                continue
+            raw_timestamp = frame.get("best_effort_timestamp_time")
+            if raw_timestamp is None:
+                continue
+            try:
+                fallback_timestamps.append(int(round(float(raw_timestamp) * 1000)))
+            except (TypeError, ValueError):
+                continue
+        fallback_timestamps = sorted({timestamp for timestamp in fallback_timestamps if timestamp > 0})
+        return fallback_timestamps, {
+            "code": "scenechange_fallback",
+            "message": "scenechange probe failed and was downgraded to keyframe-based boundaries.",
+        }
 
 
 def _vlm_reference_warnings(vlm_report: dict[str, Any], reference_id: str) -> list[dict[str, Any]]:

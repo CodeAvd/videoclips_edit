@@ -21,6 +21,9 @@ from experiments.autoresearch.taxonomy import (
     unique_sorted_timestamps,
 )
 
+SCENE_CHANGE_THRESHOLD = 0.35
+SCENE_CHANGE_MIN_GAP_MS = 400
+
 
 def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -63,6 +66,38 @@ def run_ffprobe_json(*, video_path: Path, ffprobe_bin: str = "ffprobe") -> dict[
     return json.loads(completed.stdout)
 
 
+def run_ffmpeg_scene_changes(
+    *,
+    video_path: Path,
+    ffmpeg_bin: str = "ffmpeg",
+    threshold: float = SCENE_CHANGE_THRESHOLD,
+    min_gap_ms: int = SCENE_CHANGE_MIN_GAP_MS,
+) -> list[int]:
+    command = [
+        ffmpeg_bin,
+        "-hide_banner",
+        "-i",
+        str(video_path),
+        "-vf",
+        f"select='gt(scene,{threshold})',showinfo",
+        "-an",
+        "-f",
+        "null",
+        "-",
+    ]
+    result = subprocess.run(command, check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"scenechange probe failed with exit code {result.returncode}")
+    return _parse_scene_change_timestamps_ms(result.stderr, min_gap_ms=min_gap_ms)
+
+
+def resolve_reference_video_path(*, collection_dir: Path, file_name: str) -> Path:
+    for candidate in (collection_dir / "videos" / file_name, collection_dir / file_name):
+        if candidate.exists():
+            return candidate
+    return collection_dir / "videos" / file_name
+
+
 def build_manifest_lock(
     *,
     collection_dir: Path,
@@ -74,9 +109,8 @@ def build_manifest_lock(
     vlm_model: str | None = None,
 ) -> dict[str, Any]:
     references: list[dict[str, Any]] = []
-    videos_dir = collection_dir / "videos"
     for entry in entries:
-        video_path = videos_dir / entry.file_name
+        video_path = resolve_reference_video_path(collection_dir=collection_dir, file_name=entry.file_name)
         reference_payload = {
             "reference_id": entry.reference_id,
             "file_name": entry.file_name,
@@ -105,7 +139,11 @@ def build_manifest_lock(
     }
 
 
-def build_technical_probe(ffprobe_payload: dict[str, Any]) -> dict[str, Any]:
+def build_technical_probe(
+    ffprobe_payload: dict[str, Any],
+    *,
+    scene_change_timestamps_ms: list[int] | None = None,
+) -> dict[str, Any]:
     streams = ffprobe_payload.get("streams", [])
     format_payload = ffprobe_payload.get("format", {})
     video_stream = next((stream for stream in streams if stream.get("codec_type") == "video"), {})
@@ -120,9 +158,14 @@ def build_technical_probe(ffprobe_payload: dict[str, Any]) -> dict[str, Any]:
     if bitrate_kbps is not None:
         bitrate_kbps = round(bitrate_kbps / 1000.0, 2)
     keyframe_timestamps = _collect_keyframe_timestamps_ms(ffprobe_payload)
-    scene_count = max(1, len(keyframe_timestamps) or 1)
-    cut_density = round(scene_count / max(duration_ms / 60_000.0, 1e-6), 4) if duration_ms > 0 else 0.0
-    opening_cut_count = sum(1 for timestamp in keyframe_timestamps if 0 < timestamp <= 3000)
+    scene_change_timestamps = (
+        sorted({int(timestamp) for timestamp in scene_change_timestamps_ms if int(timestamp) > 0})
+        if scene_change_timestamps_ms is not None
+        else keyframe_timestamps
+    )
+    scene_count = max(1, len(scene_change_timestamps) + 1)
+    cut_density = round(len(scene_change_timestamps) / max(duration_ms / 60_000.0, 1e-6), 4) if duration_ms > 0 else 0.0
+    opening_cut_count = sum(1 for timestamp in scene_change_timestamps if 0 < timestamp <= 3000)
     return {
         "duration_ms": duration_ms,
         "length_bucket": length_bucket_for_duration(duration_ms),
@@ -140,7 +183,7 @@ def build_technical_probe(ffprobe_payload: dict[str, Any]) -> dict[str, Any]:
         "cut_density_per_min": cut_density,
         "cut_density_per_minute": cut_density,
         "opening_cut_count": opening_cut_count,
-        "scene_boundaries_ms": [0, *keyframe_timestamps],
+        "scene_boundaries_ms": [0, *scene_change_timestamps],
     }
 
 
@@ -404,6 +447,23 @@ def _collect_keyframe_timestamps_ms(ffprobe_payload: dict[str, Any]) -> list[int
             continue
         timestamps.append(int(round(timestamp * 1000)))
     return sorted(set(timestamp for timestamp in timestamps if timestamp > 0))
+
+
+def _parse_scene_change_timestamps_ms(stderr: str, *, min_gap_ms: int) -> list[int]:
+    timestamps = [
+        int(round(float(match) * 1000))
+        for match in re.findall(r"pts_time:([0-9.]+)", stderr or "")
+    ]
+    unique_timestamps = sorted({timestamp for timestamp in timestamps if timestamp > 0})
+    return _coalesce_timestamps_ms(unique_timestamps, min_gap_ms=min_gap_ms)
+
+
+def _coalesce_timestamps_ms(timestamps_ms: list[int], *, min_gap_ms: int) -> list[int]:
+    coalesced: list[int] = []
+    for timestamp in timestamps_ms:
+        if not coalesced or timestamp - coalesced[-1] >= min_gap_ms:
+            coalesced.append(timestamp)
+    return coalesced
 
 
 def _parse_avg_frame_rate(raw_value: Any) -> float | None:

@@ -166,13 +166,24 @@ def test_reference_manifest_rejects_missing_required_values(tmp_path: Path) -> N
         load_reference_manifest(collection_dir)
 
 
-def test_reference_manifest_requires_videos_directory(tmp_path: Path) -> None:
+def test_reference_manifest_accepts_root_level_videos_as_fallback(tmp_path: Path) -> None:
     collection_dir = build_reference_collection(tmp_path)
-    for child in (collection_dir / "videos").iterdir():
+    for child in list((collection_dir / "videos").iterdir()):
+        child.replace(collection_dir / child.name)
+    (collection_dir / "videos").rmdir()
+
+    entries = load_reference_manifest(collection_dir)
+
+    assert [entry.reference_id for entry in entries] == ["ref-001", "ref-002"]
+
+
+def test_reference_manifest_rejects_missing_video_layout(tmp_path: Path) -> None:
+    collection_dir = build_reference_collection(tmp_path)
+    for child in list((collection_dir / "videos").iterdir()):
         child.unlink()
     (collection_dir / "videos").rmdir()
 
-    with pytest.raises(ReferenceManifestError, match="videos/ directory"):
+    with pytest.raises(ReferenceManifestError, match="does not exist under"):
         load_reference_manifest(collection_dir)
 
 
@@ -222,6 +233,36 @@ def test_analyze_reference_collection_builds_report_and_clusters(tmp_path: Path)
     assert isinstance(report["clusters"], dict)
     assert "daily-news" in report["clusters"]
     assert report["cluster_payload"]["clusters"]
+
+
+def test_analyze_reference_collection_supports_root_level_video_fallback(tmp_path: Path) -> None:
+    collection_dir = build_reference_collection(tmp_path)
+    for child in list((collection_dir / "videos").iterdir()):
+        child.replace(collection_dir / child.name)
+    (collection_dir / "videos").rmdir()
+
+    report = analyze_reference_collection(collection_dir)
+
+    assert report["reference_count"] == 2
+    assert report["manifest_lock"]["references"][0]["file_name"] == "short-01.mp4"
+
+
+def test_scene_change_probe_replaces_keyframe_proxy(tmp_path: Path, monkeypatch) -> None:
+    collection_dir = build_reference_collection(tmp_path)
+
+    monkeypatch.setattr(
+        reference_intelligence_module,
+        "run_ffmpeg_scene_changes",
+        lambda **_: [1200, 3200, 6800],
+    )
+
+    report = analyze_reference_collection(collection_dir)
+
+    first_probe = report["references"][0]["technical_probe"]
+    assert first_probe["scene_count"] == 4
+    assert first_probe["opening_cut_count"] == 1
+    assert first_probe["scene_boundaries_ms"][:4] == [0, 1200, 3200, 6800]
+    assert first_probe["keyframe_count"] > first_probe["scene_count"]
 
 
 def test_opening_ocr_contract_uses_only_opening_frames(tmp_path: Path, monkeypatch) -> None:
