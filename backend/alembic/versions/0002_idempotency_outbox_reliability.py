@@ -1,6 +1,6 @@
-"""idempotency_outbox_reliability
+"""outbox_reliability
 
-Revision ID: 0002_idempotency_outbox_reliability
+Revision ID: 0002_outbox_reliability
 Revises: 0001_m0_m1_baseline
 Create Date: 2026-04-05 00:30:00.000000
 """
@@ -10,7 +10,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 
-revision = "0002_idempotency_outbox_reliability"
+revision = "0002_outbox_reliability"
 down_revision = "0001_m0_m1_baseline"
 branch_labels = None
 depends_on = None

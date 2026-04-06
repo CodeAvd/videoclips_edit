@@ -3,6 +3,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 import os
 from pathlib import Path
+import time
 
 from alembic import command
 from alembic.config import Config
@@ -16,9 +17,11 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.pool import StaticPool
+from sqlalchemy.exc import DBAPIError, OperationalError
 
 from app.core.config import get_settings
 from app.core.database import Base, get_db_session
+from app.core.security import build_signed_auth_token
 from app.main import app
 from app.models import *  # noqa: F401,F403
 from app.services.storage import get_storage_service
@@ -57,6 +60,14 @@ def assert_disposable_postgres_url(database_url: str) -> None:
         )
 
 
+def build_postgres_connect_args(database_url: str) -> dict[str, object]:
+    url = make_url(database_url)
+    host = (url.host or "").lower()
+    if host in {"localhost", "127.0.0.1"}:
+        return {"ssl": False}
+    return {}
+
+
 def upgrade_database_to_head(database_url: str) -> str:
     previous_database_url = os.environ.get("DATABASE_URL")
     os.environ["DATABASE_URL"] = database_url
@@ -75,7 +86,7 @@ def upgrade_database_to_head(database_url: str) -> str:
 
 
 async def reset_public_schema(database_url: str) -> None:
-    engine = create_async_engine(database_url)
+    engine = create_async_engine(database_url, connect_args=build_postgres_connect_args(database_url))
     try:
         async with engine.begin() as conn:
             await conn.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
@@ -84,8 +95,29 @@ async def reset_public_schema(database_url: str) -> None:
         await engine.dispose()
 
 
+async def wait_for_postgres(database_url: str, *, timeout_seconds: float = 30.0) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    last_error: Exception | None = None
+
+    while time.monotonic() < deadline:
+        engine = create_async_engine(database_url, connect_args=build_postgres_connect_args(database_url))
+        try:
+            async with engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+                return
+        except (OperationalError, DBAPIError, OSError, ConnectionError) as exc:
+            last_error = exc
+            await asyncio.sleep(1)
+        finally:
+            await engine.dispose()
+
+    raise RuntimeError(
+        "Timed out waiting for disposable Postgres to accept connections."
+    ) from last_error
+
+
 async def assert_database_at_head(database_url: str, *, expected_head: str) -> None:
-    engine = create_async_engine(database_url)
+    engine = create_async_engine(database_url, connect_args=build_postgres_connect_args(database_url))
     try:
         async with engine.connect() as conn:
             def verify_revision(sync_conn) -> tuple[bool, str | None, str | None]:
@@ -134,6 +166,69 @@ def actor_headers() -> dict[str, str]:
         "X-Actor-Id": "test-admin",
         "X-Actor-Role": "admin",
     }
+
+
+@pytest.fixture()
+def configure_auth(monkeypatch):
+    def _configure(**overrides: str | int | None) -> None:
+        for key, value in overrides.items():
+            if value is None:
+                monkeypatch.delenv(key, raising=False)
+            else:
+                monkeypatch.setenv(key, str(value))
+        get_settings.cache_clear()
+
+    yield _configure
+    get_settings.cache_clear()
+    get_storage_service.cache_clear()
+
+
+@pytest.fixture()
+def session_cookie_factory():
+    def _factory(
+        *,
+        actor_id: str = "session-admin",
+        role: str = "admin",
+        principal_type: str = "user",
+        expires_in_seconds: int = 3600,
+        issuer: str | None = None,
+    ) -> dict[str, str]:
+        settings = get_settings()
+        claims = {
+            "actor_id": actor_id,
+            "role": role,
+            "principal_type": principal_type,
+            "iss": issuer or settings.auth_session_issuer,
+            "exp": int(time.time()) + expires_in_seconds,
+        }
+        token = build_signed_auth_token(claims, settings.auth_session_secret or "")
+        return {settings.auth_session_cookie_name: token}
+
+    return _factory
+
+
+@pytest.fixture()
+def worker_jwt_factory():
+    def _factory(
+        *,
+        worker_id: str = "worker-1",
+        scopes: tuple[str, ...] = ("worker:internal",),
+        principal_type: str = "worker",
+        issuer: str | None = None,
+        expires_in_seconds: int = 3600,
+    ) -> str:
+        settings = get_settings()
+        claims = {
+            "sub": worker_id,
+            "worker_id": worker_id,
+            "principal_type": principal_type,
+            "scope": " ".join(scopes),
+            "iss": issuer or settings.auth_worker_jwt_issuer,
+            "exp": int(time.time()) + expires_in_seconds,
+        }
+        return build_signed_auth_token(claims, settings.auth_worker_jwt_secret or "")
+
+    return _factory
 
 
 @pytest.fixture()
@@ -189,11 +284,16 @@ async def postgres_session_factory(
     postgres_test_database_url: str,
     storage_root,
 ) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    await wait_for_postgres(postgres_test_database_url)
     await reset_public_schema(postgres_test_database_url)
     head_revision = await asyncio.to_thread(upgrade_database_to_head, postgres_test_database_url)
     await assert_database_at_head(postgres_test_database_url, expected_head=head_revision)
 
-    engine = create_async_engine(postgres_test_database_url, echo=False)
+    engine = create_async_engine(
+        postgres_test_database_url,
+        echo=False,
+        connect_args=build_postgres_connect_args(postgres_test_database_url),
+    )
     factory = async_sessionmaker(bind=engine, expire_on_commit=False, class_=AsyncSession)
     try:
         yield factory

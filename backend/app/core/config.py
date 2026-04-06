@@ -20,6 +20,13 @@ class Settings(BaseSettings):
     auth_mode: str = "development_header"
     default_dev_actor_id: str = "local-dev"
     default_dev_role: str = "admin"
+    auth_session_cookie_name: str = "ai_shorts_session"
+    auth_session_secret: str | None = None
+    auth_session_issuer: str = "ai-shorts-engine"
+    auth_session_max_age_seconds: int = 43200
+    auth_worker_jwt_secret: str | None = None
+    auth_worker_jwt_issuer: str = "ai-shorts-engine-workers"
+    auth_worker_required_scope: str = "worker:internal"
     cors_allow_origins: list[str] = Field(default_factory=lambda: ["*"])
     app_base_url: str = "http://localhost:8000"
     storage_backend: str = "filesystem"

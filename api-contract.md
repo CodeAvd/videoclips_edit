@@ -128,13 +128,35 @@
   - `source_type`
   - `provenance` when `source_type = approved_import`
 - Response:
-  - `source_video_id`
+  - minimum stable fields:
+    - `id`
+    - `ingest_status`
+  - current implementation also returns the created source-video record fields
   - `ingest_status`
 - Auth: `operator`, `admin`
 
 #### `GET /source-videos/{source_video_id}`
 
 - Purpose: fetch intake state and attached artifacts.
+- Response:
+  - base source-video fields
+  - `artifacts`: latest attached artifact per role
+    - `source_asset`
+    - `canonical_video`
+    - `proxy_video`
+    - `normalized_audio`
+    - `thumbnails`
+  - each artifact entry includes:
+    - `artifact_id`
+    - `role`
+    - `kind`
+    - `storage_key`
+    - `mime_type`
+    - `size_bytes`
+    - `sha256`
+    - `metadata_jsonb`
+    - `attached_at`
+  - `provenance`: created-order provenance entries for approved imports or manual attestation evidence
 
 ### Jobs
 

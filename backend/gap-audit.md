@@ -21,28 +21,31 @@
 - First-class API idempotency is implemented for `POST /jobs`, `POST /jobs/{id}/actions/resolve-intake-review`, and `POST /uploads/{id}/complete`.
 - Retryable stage failures now close the current `outbox_event` and `stage_run`, then enqueue a new delayed `StageRun` attempt with incremented `attempt_no`.
 - Worker execution now commits claims before long-running work, renews both stage and outbox leases while work is active, and deterministically reclaims expired claimed/running `StageRun`s.
+- Lease heartbeat renewal now extends execution only for the owning `(worker_id, lease_token)` pair, and expired claimed `outbox_event` rows are covered by regression tests through `process_next_outbox_event`.
 - SQLite-backed API/worker regression tests now cover upload completion, idempotent job creation, and retry vs terminal outbox behavior.
 - `ingest` now uses real `ffmpeg` processing for normalized audio and proxy generation instead of stub media bytes.
 - `transcript` now goes through a provider abstraction with `Groq -> OpenAI -> Stub` fallback and persists normalized `transcript_revision`, `transcript_word`, and `transcript_segment` output plus raw ASR payload artifacts.
 - `feature_extract` now writes pause, audio-energy, scene, active-speaker, crop-risk, and summary artifacts to `stage_run_artifact`.
 - `ranking` now creates versioned `candidate_set` plus ranked `candidate_clip` rows and exposes them via read APIs.
+- `GET /source-videos/{id}` now returns attached artifacts keyed by role plus created-order provenance records.
+- `GET /jobs/{id}` now returns the current config snapshot, latest-per-stage execution summary, output counts for current transcript/candidate outputs, and a current approval-state projection for the review console.
+- Offline eval support is now implemented through `eval_set`, `eval_set_member`, `candidate_label`, `benchmark_run`, `benchmark_result`, and an internal benchmark runner that persists a comparison artifact.
+- Fresh-install migration parity is now verified on disposable Postgres: `docker compose` boot, Alembic `0001 -> 0002 -> 0003 -> 0004`, and the `upload -> ranking` worker smoke path all pass against `ai_shorts_engine_test`.
 - Candidate clip APIs now exist:
   - `GET /jobs/{job_id}/candidate-clips`
   - `GET /candidate-clips/{candidate_clip_id}`
 
 ## Critic Pass
 
-### P0
-
-- Fresh-install migration parity still needs one explicit verification pass.
-  - Current state: the runtime now depends on `0001 -> 0002 -> 0003`, but there is still no live Postgres migration smoke in this workspace.
-  - Risk: SQLite `create_all()` tests stay green while a clean Postgres boot can still fail on enum/index/migration drift.
-  - Localized in:
-    - `alembic/versions/`
-    - `tests/conftest.py`
-    - `docker-compose.yml`
-
 ### P1
+
+- Auth is still a bridge implementation rather than the full contract.
+  - Current state: route-level RBAC exists, `development_header` remains available for local work, and backend-side signed `session_cookie` verification now removes the old `501` path for non-dev console auth.
+  - Remaining risk: the public contract still targets `OIDC + httpOnly Secure session cookie`, while full session issuance, rotation, revocation, and any internal worker HTTP surface still need production-grade integration.
+  - Localized in:
+    - `app/core/security.py`
+    - `app/core/config.py`
+    - `tests/test_auth_rbac.py`
 
 - Idempotency is still partial.
   - Current state: write-path idempotency exists for the most important current endpoints, but not yet for future approval/publish actions.
@@ -68,13 +71,19 @@
     - `app/api/v1/endpoints/source_videos.py`
     - `app/services/worker_runtime.py`
 
-- Offline eval harness is still missing.
-  - Current state: ranking is now implemented, but `eval_set`, `eval_set_member`, and `candidate_label` are still docs-only.
-  - Risk: ranking can iterate without a frozen benchmark gate, which will make regressions visible only after later preview/publish work lands.
+- Job detail approval state is still a coarse projection until `M3/M4` review tables exist.
+  - Current state: `GET /jobs/{id}` now satisfies the pre-`M3` review-console need using current config snapshot, stage summary, output counts, and a status-derived approval-state projection.
+  - Remaining risk: once `shortlist_decision`, `approval_payload_snapshot`, and `final_approval` land, the projection must be replaced with a read model backed by the actual review/approval records.
   - Localized in:
-    - `db-schema.md`
-    - `implementation-backlog.md`
-    - future `backend` eval tables/services
+    - `app/api/v1/endpoints/jobs.py`
+    - `app/schemas/job.py`
+
+- DB-backed benchmark confidence is still only partially proven.
+  - Current state: the eval harness persists comparison artifacts and benchmark results, and live disposable-Postgres smoke is now green in this workspace.
+  - Remaining risk: the formal pre-`M3` benchmark gate still needs one real frozen eval set with persisted comparison evidence for the active `prompt_version` and `scoring_policy_version`, not just test-generated proof.
+  - Localized in:
+    - `tests/test_eval_harness.py`
+    - `app/services/eval_harness.py`
 
 ### P2
 
@@ -129,20 +138,34 @@
 
 ### Closure Plan 4: Postgres Integration Harness
 
-- Bring up `postgres` via `docker compose`.
-- Add pytest fixtures for:
-  - migrated test DB
-  - FastAPI test client
-  - dev auth headers
-- Cover:
-  - upload session create -> local content upload -> complete
-  - source video create
-  - job create
-- single worker pass `intake -> ingest -> transcript -> feature_extract -> ranking`
+- Closed for the current pre-`M3` gate.
+- Local compose bootstraps an explicit disposable database `ai_shorts_engine_test` in the same container.
+- The smoke harness now:
+  - waits for disposable Postgres readiness after `docker compose up -d`
+  - disables SSL automatically for localhost disposable URLs
+  - migrates cleanly through `0001 -> 0002 -> 0003 -> 0004`
+  - proves `upload -> intake -> ingest -> transcript -> feature_extract -> ranking` on real Postgres
+- Verified entrypoints:
+  - `pytest tests/test_postgres_migration_smoke.py tests/test_eval_harness.py -m postgres -q`
+  - `pytest -q` with `POSTGRES_TEST_DATABASE_URL` pointed at `ai_shorts_engine_test`
 
-### Closure Plan 5: Ranking Eval Harness + Render Prep
+### Closure Plan 5: Bridge Auth and RBAC
 
-- Add eval-set tables and frozen benchmark fixtures before changing ranking heuristics further.
+- Partially closed for the current public control plane.
+- `development_header` remains available for local development and test harnesses.
+- `session_cookie` now validates signed console session claims instead of returning `501`.
+- Route-level RBAC continues to flow through `require_role(...)`, with `401 unauthorized` for missing/invalid credentials and `403 forbidden` for insufficient roles.
+- Remaining contract gap:
+  - full OIDC session issuance and management are still pending;
+  - future worker-only HTTP routes must use dedicated worker JWT verification rather than console auth.
+
+### Closure Plan 6: Ranking Eval Harness + Render Prep
+
+- Partially closed for the current `M0-M2` path.
+- Eval-set tables, benchmark persistence, and the comparison-artifact gate now exist.
+- Live Postgres smoke is now verified.
+- Remaining pre-`M3` requirement:
+  - run the benchmark harness against a real frozen eval set and persist comparison evidence for the active `prompt_version` and `scoring_policy_version`
 - Keep subtitles and B-roll in `M3+`; use current `feature_extract` artifacts as the future subtitle/B-roll input seam.
 - Prepare `edit_plan`/`render_variant` only after preview render scope is finalized.
 
@@ -165,5 +188,5 @@
 
 - Do not add `M2` ranking work before DB-backed integration tests exist.
 - Do not extend `M2` ranking heuristics before DB-backed integration tests and an eval harness exist.
-- Do not ship preview/final render before live Postgres smoke exists and the new stages consume `source_video_artifact(role='canonical_video')`.
+- Do not ship preview/final render before live Postgres smoke exists, the new stages consume `source_video_artifact(role='canonical_video')`, and a persisted benchmark comparison artifact exists for the active `prompt_version` and `scoring_policy_version`.
 - Do not expand publish/approval surfaces before first-class idempotency is in place.

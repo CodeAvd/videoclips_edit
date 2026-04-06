@@ -3,7 +3,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-from app.models.enums import IngestStatus, ProvenanceType, SourceType
+from app.models.enums import ArtifactKind, IngestStatus, ProvenanceType, SourceType, SourceVideoArtifactRole
 from app.schemas.common import AppSchema
 
 
@@ -38,3 +38,31 @@ class SourceVideoOut(AppSchema):
     speaker_count_estimate: int | None
     rights_attestation: bool
     ingest_status: IngestStatus
+
+
+class SourceVideoArtifactOut(AppSchema):
+    artifact_id: UUID
+    role: SourceVideoArtifactRole
+    kind: ArtifactKind
+    storage_key: str
+    mime_type: str
+    size_bytes: int
+    sha256: str
+    metadata_jsonb: dict
+    attached_at: datetime
+
+
+class SourceVideoProvenanceOut(AppSchema):
+    id: UUID
+    provenance_type: ProvenanceType
+    provider: str | None
+    source_uri: str | None
+    evidence_artifact_id: UUID | None
+    approved_by: str | None
+    approved_at: datetime | None
+    created_at: datetime
+
+
+class SourceVideoDetailOut(SourceVideoOut):
+    artifacts: dict[str, SourceVideoArtifactOut]
+    provenance: list[SourceVideoProvenanceOut]

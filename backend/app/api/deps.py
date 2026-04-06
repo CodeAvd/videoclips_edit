@@ -5,11 +5,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
 from app.core.database import get_db_session
-from app.core.security import AuthContext, get_auth_context
+from app.core.security import AuthContext, get_auth_context, get_worker_auth_context
 from app.services.storage import StorageService, get_storage_service
 
 DbSession = Annotated[AsyncSession, Depends(get_db_session)]
 Actor = Annotated[AuthContext, Depends(get_auth_context)]
+WorkerActor = Annotated[AuthContext, Depends(get_worker_auth_context)]
 Storage = Annotated[StorageService, Depends(get_storage_service)]
 
 

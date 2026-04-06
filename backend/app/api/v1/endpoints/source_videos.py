@@ -7,9 +7,16 @@ from app.api.deps import DbSession
 from app.core.errors import AppError
 from app.core.security import require_role
 from app.models.config import BrandProfile
-from app.models.enums import ActorRole, ArtifactKind, IngestStatus, SourceType
+from app.models.enums import ActorRole, ArtifactKind, IngestStatus, SourceType, SourceVideoArtifactRole
 from app.models.job import ArtifactObject, SourceVideo, SourceVideoArtifact, SourceVideoProvenance
-from app.schemas.source_video import CreateSourceVideoRequest, SourceVideoOut
+from app.schemas.source_video import (
+    CreateSourceVideoRequest,
+    SourceVideoArtifactOut,
+    SourceVideoDetailOut,
+    SourceVideoOut,
+    SourceVideoProvenanceOut,
+)
+from app.services.source_video_artifacts import list_source_video_artifacts, list_source_video_provenance
 
 router = APIRouter()
 
@@ -60,7 +67,13 @@ async def create_source_video(payload: CreateSourceVideoRequest, db: DbSession) 
     )
     db.add(source_video)
     await db.flush()
-    db.add(SourceVideoArtifact(source_video_id=source_video.id, artifact_id=canonical_asset_id, role="source_asset"))
+    db.add(
+        SourceVideoArtifact(
+            source_video_id=source_video.id,
+            artifact_id=canonical_asset_id,
+            role=SourceVideoArtifactRole.source_asset.value,
+        )
+    )
 
     if payload.provenance is not None:
         provenance = SourceVideoProvenance(source_video_id=source_video.id, **payload.provenance.model_dump())
@@ -73,11 +86,30 @@ async def create_source_video(payload: CreateSourceVideoRequest, db: DbSession) 
 
 @router.get(
     "/{source_video_id}",
-    response_model=SourceVideoOut,
+    response_model=SourceVideoDetailOut,
     dependencies=[Depends(require_role(ActorRole.viewer, ActorRole.reviewer, ActorRole.operator, ActorRole.admin))],
 )
-async def get_source_video(source_video_id: UUID, db: DbSession) -> SourceVideoOut:
+async def get_source_video(source_video_id: UUID, db: DbSession) -> SourceVideoDetailOut:
     source_video = await db.get(SourceVideo, source_video_id)
     if source_video is None:
         raise AppError(code="not_found", message="Source video not found.", http_status=404)
-    return SourceVideoOut.model_validate(source_video)
+    artifact_links = await list_source_video_artifacts(db, source_video_id=source_video_id)
+    provenance_entries = await list_source_video_provenance(db, source_video_id=source_video_id)
+    return SourceVideoDetailOut(
+        **SourceVideoOut.model_validate(source_video).model_dump(),
+        artifacts={
+            link.role.value: SourceVideoArtifactOut(
+                artifact_id=link.artifact.id,
+                role=link.role,
+                kind=link.artifact.kind,
+                storage_key=link.artifact.storage_key,
+                mime_type=link.artifact.mime_type,
+                size_bytes=link.artifact.size_bytes,
+                sha256=link.artifact.sha256,
+                metadata_jsonb=link.artifact.metadata_jsonb,
+                attached_at=link.attached_at,
+            )
+            for link in artifact_links
+        },
+        provenance=[SourceVideoProvenanceOut.model_validate(entry) for entry in provenance_entries],
+    )

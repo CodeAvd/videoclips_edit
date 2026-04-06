@@ -9,7 +9,16 @@ from sqlalchemy import func, select
 from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.core.errors import AppError
-from app.models.enums import ArtifactKind, IngestStatus, JobStatus, ProvenanceType, StageName, SourceType, StageRunStatus
+from app.models.enums import (
+    ArtifactKind,
+    IngestStatus,
+    JobStatus,
+    ProvenanceType,
+    SourceType,
+    SourceVideoArtifactRole,
+    StageName,
+    StageRunStatus,
+)
 from app.models.job import (
     ArtifactObject,
     CandidateClip,
@@ -52,6 +61,7 @@ from app.services.feature_extract import (
 from app.services.intake_policy import IntakeInput, evaluate_intake
 from app.services.media_ingest import build_ingest_outputs
 from app.services.orchestration import enqueue_stage, transition_job_status
+from app.services.source_video_artifacts import get_preferred_video_artifact, get_source_video_artifact
 from app.services.storage import get_storage_service
 from app.services.transcript_provider import TranscriptSegmentItem, TranscriptWordItem, transcribe_with_fallback
 
@@ -84,8 +94,8 @@ async def renew_claimed_execution_leases(
     lease_token: str | None = None,
 ) -> str | None:
     async with SessionLocal() as heartbeat_session:
+        renewed_lease_token: str | None = None
         try:
-            await renew_outbox_lease(heartbeat_session, event_id=event_id)
             try:
                 stage_run = await get_stage_run(heartbeat_session, job_id, stage_name, attempt_no)
             except AppError:
@@ -104,11 +114,13 @@ async def renew_claimed_execution_leases(
                         lease_token=current_token,
                     )
                     if renewed:
-                        lease_token = current_token
+                        outbox_renewed = await renew_outbox_lease(heartbeat_session, event_id=event_id)
+                        if outbox_renewed:
+                            renewed_lease_token = current_token
             await heartbeat_session.commit()
         except Exception:
             await heartbeat_session.rollback()
-        return lease_token
+        return renewed_lease_token
 
 
 async def maintain_execution_leases(
@@ -187,24 +199,6 @@ async def create_artifact_from_json(
     )
     session.add(artifact)
     await session.flush()
-    return artifact
-
-
-async def get_source_video_artifact(session, *, source_video_id: UUID, role: str) -> ArtifactObject:
-    result = await session.execute(
-        select(ArtifactObject)
-        .join(SourceVideoArtifact, SourceVideoArtifact.artifact_id == ArtifactObject.id)
-        .where(SourceVideoArtifact.source_video_id == source_video_id, SourceVideoArtifact.role == role)
-        .order_by(SourceVideoArtifact.created_at.desc())
-        .limit(1)
-    )
-    artifact = result.scalars().first()
-    if artifact is None:
-        raise AppError(
-            code="artifact_not_found",
-            message=f"Source video artifact not found for role {role}.",
-            http_status=404,
-        )
     return artifact
 
 
@@ -342,7 +336,11 @@ async def handle_ingest(job_id: UUID, attempt_no: int, *, worker_id: str, sessio
     stage_run = await claim_stage_run(session, job_id=job_id, stage_name=StageName.ingest, attempt_no=attempt_no, worker_id=worker_id)
     source_video.ingest_status = IngestStatus.processing
     await session.commit()
-    source_asset = await get_source_video_artifact(session, source_video_id=source_video.id, role="source_asset")
+    source_asset = await get_source_video_artifact(
+        session,
+        source_video_id=source_video.id,
+        role=SourceVideoArtifactRole.source_asset,
+    )
     storage = get_storage_service()
     source_bytes = storage.read_bytes(storage_key=source_asset.storage_key)
     ingest_output = await build_ingest_outputs(
@@ -355,31 +353,35 @@ async def handle_ingest(job_id: UUID, attempt_no: int, *, worker_id: str, sessio
 
     derived_artifacts = [
         (
-            ("normalized_audio",),
+            (SourceVideoArtifactRole.normalized_audio,),
             ArtifactKind.normalized_audio,
             f"derived/{source_video.id}/audio.wav",
             "audio/wav",
             ingest_output.normalized_audio_bytes,
-            {"source_video_id": str(source_video.id), "role": "normalized_audio", "probe_duration_ms": ingest_output.probe.duration_ms},
+            {
+                "source_video_id": str(source_video.id),
+                "role": SourceVideoArtifactRole.normalized_audio.value,
+                "probe_duration_ms": ingest_output.probe.duration_ms,
+            },
         ),
         (
-            ("thumbnails",),
+            (SourceVideoArtifactRole.thumbnails,),
             ArtifactKind.thumbnails,
             f"derived/{source_video.id}/thumbnails.json",
             "application/json",
             None,
-            {"source_video_id": str(source_video.id), "role": "thumbnails"},
+            {"source_video_id": str(source_video.id), "role": SourceVideoArtifactRole.thumbnails.value},
         ),
     ]
     if ingest_output.proxy_video_bytes:
         derived_artifacts.append(
             (
-                ("proxy_video", "canonical_video"),
+                (SourceVideoArtifactRole.proxy_video, SourceVideoArtifactRole.canonical_video),
                 ArtifactKind.proxy_video,
                 f"derived/{source_video.id}/proxy.mp4",
                 "video/mp4",
                 ingest_output.proxy_video_bytes,
-                {"source_video_id": str(source_video.id), "role": "proxy_video"},
+                {"source_video_id": str(source_video.id), "role": SourceVideoArtifactRole.proxy_video.value},
             )
         )
 
@@ -402,7 +404,7 @@ async def handle_ingest(job_id: UUID, attempt_no: int, *, worker_id: str, sessio
                 metadata_jsonb=metadata_jsonb,
             )
         for role in roles:
-            session.add(SourceVideoArtifact(source_video_id=source_video.id, artifact_id=artifact.id, role=role))
+            session.add(SourceVideoArtifact(source_video_id=source_video.id, artifact_id=artifact.id, role=role.value))
 
     evidence = await create_artifact_from_json(
         session=session,
@@ -412,7 +414,12 @@ async def handle_ingest(job_id: UUID, attempt_no: int, *, worker_id: str, sessio
             "job_id": str(job.id),
             "stage_run_id": str(stage_run.id),
             "stage_name": StageName.ingest.value,
-            "artifacts": ["normalized_audio", "proxy_video", "canonical_video", "thumbnails"],
+            "artifacts": [
+                SourceVideoArtifactRole.normalized_audio.value,
+                SourceVideoArtifactRole.proxy_video.value,
+                SourceVideoArtifactRole.canonical_video.value,
+                SourceVideoArtifactRole.thumbnails.value,
+            ],
             "probe": {
                 "duration_ms": ingest_output.probe.duration_ms,
                 "has_video": ingest_output.probe.has_video,
@@ -439,7 +446,11 @@ async def handle_transcript(job_id: UUID, attempt_no: int, *, worker_id: str, se
     source_video = await session.get(SourceVideo, job.source_video_id)
     stage_run = await claim_stage_run(session, job_id=job_id, stage_name=StageName.transcript, attempt_no=attempt_no, worker_id=worker_id)
     await session.commit()
-    audio_artifact = await get_source_video_artifact(session, source_video_id=source_video.id, role="normalized_audio")
+    audio_artifact = await get_source_video_artifact(
+        session,
+        source_video_id=source_video.id,
+        role=SourceVideoArtifactRole.normalized_audio,
+    )
     storage = get_storage_service()
     transcript_payload = await transcribe_with_fallback(
         filename=Path(audio_artifact.storage_key).name,
@@ -527,7 +538,12 @@ async def handle_feature_extract(job_id: UUID, attempt_no: int, *, worker_id: st
     revision = await get_current_transcript_revision(session, job_id=job.id)
     words = await list_transcript_words(session, transcript_revision_id=revision.id)
     segments = await list_transcript_segments(session, transcript_revision_id=revision.id)
-    audio_artifact = await get_source_video_artifact(session, source_video_id=source_video.id, role="normalized_audio")
+    preferred_video_artifact = await get_preferred_video_artifact(session, source_video_id=source_video.id)
+    audio_artifact = await get_source_video_artifact(
+        session,
+        source_video_id=source_video.id,
+        role=SourceVideoArtifactRole.normalized_audio,
+    )
     storage = get_storage_service()
     normalized_audio_bytes = storage.read_bytes(storage_key=audio_artifact.storage_key)
 
@@ -558,7 +574,11 @@ async def handle_feature_extract(job_id: UUID, attempt_no: int, *, worker_id: st
             storage_key=f"logs/{job.id}/{stage_run.id}/{role}.json",
             kind=ArtifactKind.stage_artifact,
             payload=payload,
-            metadata_jsonb={"stage_name": StageName.feature_extract.value, "role": role},
+            metadata_jsonb={
+                "stage_name": StageName.feature_extract.value,
+                "role": role,
+                "video_storage_key": preferred_video_artifact.storage_key,
+            },
         )
         session.add(StageRunArtifact(stage_run_id=stage_run.id, artifact_id=artifact.id, role=role))
 

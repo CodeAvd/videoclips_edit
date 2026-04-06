@@ -22,10 +22,12 @@ uv run python worker.py
 
 - App skeleton and settings
 - Async SQLAlchemy setup
-- Alembic migrations through `M2` candidate ranking
+- Alembic migrations through the pre-`M3` eval harness gate
 - `health`, `uploads`, `brand-profiles`, `source-videos`, and `jobs` endpoints
 - `platform-accounts` endpoints
 - Read APIs for `transcript-segments`, `transcript-words`, and `candidate-clips`
+- `GET /source-videos/{id}` detail response with role-keyed artifacts and provenance
+- `GET /jobs/{id}` detail response with current config snapshot, stage summary, output counts, and current approval-state projection
 - Filesystem/MinIO-backed storage abstraction
 - Local direct-upload route for the filesystem backend: `PUT /api/v1/uploads/{id}/content`
 - DB-polled worker runtime for `intake -> ingest -> transcript -> feature_extract -> ranking`
@@ -35,23 +37,45 @@ uv run python worker.py
 - Pluggable storage backend contract with `filesystem` default and `minio` option
 - First-class idempotency for current write paths: `jobs`, `resolve-intake-review`, and `upload complete`
 - Retryable outbox failures with backoff plus terminal failure propagation into `stage_run` / `job`
+- Lease-heartbeat ownership checks for `stage_run` + `outbox_event` renewal
 - Real `ffmpeg`-based ingest for normalized audio and proxy generation
 - Transcript provider abstraction with `Groq -> OpenAI -> Stub` fallback order
 - Deterministic feature extraction and ranked `candidate_set/candidate_clip` persistence
+- Internal offline eval harness with persisted benchmark comparison artifacts
 - Opt-in Postgres migration smoke test for the `upload -> ranking` worker flow
 
-## Dev Auth
+## Auth Modes
 
-By default, local development uses header-based auth.
+By default, local development uses `AUTH_MODE=development_header`.
 
 - `X-Actor-Id`
 - `X-Actor-Role`
 
 If omitted, the app falls back to the configured default dev actor.
 
+The backend now also supports a bridge `AUTH_MODE=session_cookie` mode for non-dev verification.
+It validates a pre-issued, signed session cookie and maps the cookie claims into the existing route-level RBAC guards.
+This is intentionally narrower than the full `OIDC + httpOnly Secure session cookie` contract:
+
+- the backend verifies a signed session envelope;
+- full login, redirect, session issuance, rotation, and revocation remain outside this slice;
+- worker JWT verification is available as a separate internal dependency for future internal-only HTTP surfaces.
+
+Required session-cookie settings:
+
+- `AUTH_SESSION_COOKIE_NAME`
+- `AUTH_SESSION_SECRET`
+- `AUTH_SESSION_ISSUER`
+
+When `AUTH_MODE=session_cookie`:
+
+- missing, malformed, expired, or bad-signature cookies return `401 unauthorized`;
+- authenticated actors with insufficient role still return `403 forbidden`.
+
 ## Local Services
 
 - Postgres: `localhost:5432`
+- Disposable smoke DB in the same container: `ai_shorts_engine_test`
 - MinIO API: `localhost:9000`
 - MinIO console: `localhost:9001`
 
@@ -87,6 +111,7 @@ For offline development and tests, set `ASR_PROVIDER_PRIMARY=stub`.
 Use an explicitly disposable Postgres database and pass it through `POSTGRES_TEST_DATABASE_URL`.
 The test fixture resets the `public` schema before running Alembic migrations, so do not point it at any non-test database.
 Use a database name that clearly includes a disposable token such as `_test`, `_smoke`, `_tmp`, or `_sandbox`.
+The local `docker compose` stack now bootstraps `ai_shorts_engine_test` inside the existing Postgres container so the smoke path can run without provisioning a second service.
 
 ```bash
 POSTGRES_TEST_DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/ai_shorts_engine_test uv run pytest tests/test_postgres_migration_smoke.py -m postgres -q
@@ -95,14 +120,36 @@ POSTGRES_TEST_DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432
 Or via `make`:
 
 ```bash
-POSTGRES_TEST_DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/ai_shorts_engine_test make test-postgres-smoke
+make test-postgres-smoke
+```
+
+Or run the full pre-`M3` database-backed gate against the local disposable database:
+
+```bash
+make test-pre-m3-gates
 ```
 
 Behavior notes:
 
 - if `POSTGRES_TEST_DATABASE_URL` is absent, the Postgres smoke test is skipped explicitly;
 - the test never falls back to SQLite;
+- the local smoke fixture now waits briefly for disposable Postgres readiness and disables SSL automatically for localhost disposable URLs;
 - Docker or `docker compose` can be used to provide Postgres externally, but pytest does not invoke Docker itself.
+- if your `postgres_data` volume already existed before the disposable test DB bootstrap script was added, run `make dev-down` and then `make dev-up` once so `ai_shorts_engine_test` is created.
+
+## Eval Harness
+
+The offline benchmark runner is internal-only in v1 and persists a comparison artifact through `artifact_object`.
+
+```bash
+EVAL_SET_ID=<uuid> PROMPT_VERSION=v1 SCORING_POLICY_VERSION=v1 make eval-benchmark
+```
+
+The eval gate is satisfied only when:
+
+- the eval set is frozen;
+- a `benchmark_run` exists for the active `prompt_version` and `scoring_policy_version`;
+- that run has persisted `benchmark_result` rows and a comparison artifact.
 
 ## Audit
 

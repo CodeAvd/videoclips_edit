@@ -96,3 +96,93 @@ async def test_renew_claimed_execution_leases_extends_stage_and_outbox_deadlines
         stage_run = (await session.execute(select(StageRun).where(StageRun.job_id == job_id))).scalars().one()
         assert event.status == OutboxStatus.claimed
         assert stage_run.status == StageRunStatus.succeeded
+
+
+async def test_renew_claimed_execution_leases_does_not_extend_deadlines_for_non_owner(
+    client,
+    actor_headers,
+    session_factory,
+    monkeypatch,
+) -> None:
+    _, source_video_id = await create_uploaded_source_video(client, actor_headers)
+    job_payload = await create_job(client, actor_headers, source_video_id)
+    job_id = UUID(job_payload["job_id"])
+    worker_id = "lease-owner"
+
+    async with session_factory() as session:
+        event = await claim_next_outbox_event(session)
+        assert event is not None
+        current_job_id, stage_name, attempt_no = worker_runtime.parse_event_payload(event.payload_jsonb)
+        stage_run = await claim_stage_run(
+            session,
+            job_id=current_job_id,
+            stage_name=stage_name,
+            attempt_no=attempt_no,
+            worker_id=worker_id,
+        )
+        await session.commit()
+        outbox_before = ensure_aware(event.lease_expires_at)
+        stage_before = ensure_aware(stage_run.lease_expires_at)
+
+    monkeypatch.setattr(worker_runtime, "SessionLocal", session_factory)
+    renewed_token = await worker_runtime.renew_claimed_execution_leases(
+        event_id=event.id,
+        job_id=job_id,
+        stage_name=stage_run.stage_name,
+        attempt_no=stage_run.attempt_no,
+        worker_id="intruder-worker",
+        lease_token="wrong-token",
+    )
+
+    assert renewed_token is None
+
+    async with session_factory() as session:
+        event = (await session.execute(select(OutboxEvent).where(OutboxEvent.aggregate_id == job_payload["job_id"]))).scalars().one()
+        stage_run = (await session.execute(select(StageRun).where(StageRun.job_id == job_id))).scalars().one()
+        assert ensure_aware(event.lease_expires_at) == outbox_before
+        assert ensure_aware(stage_run.lease_expires_at) == stage_before
+        assert stage_run.worker_id == worker_id
+        assert stage_run.status == StageRunStatus.running
+
+
+async def test_renew_claimed_execution_leases_does_not_extend_non_owner_leases(
+    client,
+    actor_headers,
+    session_factory,
+    monkeypatch,
+) -> None:
+    _, source_video_id = await create_uploaded_source_video(client, actor_headers)
+    job_payload = await create_job(client, actor_headers, source_video_id)
+    job_id = UUID(job_payload["job_id"])
+
+    async with session_factory() as session:
+        event = await claim_next_outbox_event(session)
+        assert event is not None
+        current_job_id, stage_name, attempt_no = worker_runtime.parse_event_payload(event.payload_jsonb)
+        assert current_job_id == job_id
+        stage_run = await claim_stage_run(
+            session,
+            job_id=current_job_id,
+            stage_name=stage_name,
+            attempt_no=attempt_no,
+            worker_id="owner-worker",
+        )
+        await session.commit()
+        outbox_before = ensure_aware(event.lease_expires_at)
+        stage_before = ensure_aware(stage_run.lease_expires_at)
+
+    monkeypatch.setattr(worker_runtime, "SessionLocal", session_factory)
+    renewed_token = await worker_runtime.renew_claimed_execution_leases(
+        event_id=event.id,
+        job_id=job_id,
+        stage_name=stage_run.stage_name,
+        attempt_no=stage_run.attempt_no,
+        worker_id="other-worker",
+    )
+
+    async with session_factory() as session:
+        event = (await session.execute(select(OutboxEvent).where(OutboxEvent.id == event.id))).scalars().one()
+        stage_run = (await session.execute(select(StageRun).where(StageRun.id == stage_run.id))).scalars().one()
+        assert renewed_token is None
+        assert ensure_aware(event.lease_expires_at) == outbox_before
+        assert ensure_aware(stage_run.lease_expires_at) == stage_before

@@ -1,12 +1,13 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
 from sqlalchemy import select
 
 from app.core.errors import AppError
-from app.models.enums import JobStatus, OutboxStatus, StageRunStatus
+from app.models.enums import JobStatus, OutboxStatus, StageName, StageRunStatus
 from app.models.job import Job, OutboxEvent, StageRun
+from app.repositories.outbox import claim_next_outbox_event
 from app.services import worker_runtime
 from flow_helpers import create_job, create_uploaded_source_video
 
@@ -94,3 +95,49 @@ async def test_process_next_outbox_event_marks_terminal_failures(client, actor_h
         job = await session.get(Job, job_id)
         assert job is not None
         assert job.status == JobStatus.failed
+
+
+async def test_process_next_outbox_event_reclaims_expired_claimed_event(
+    client,
+    actor_headers,
+    session_factory,
+    monkeypatch,
+) -> None:
+    _, source_video_id = await create_uploaded_source_video(client, actor_headers)
+    job_payload = await create_job(client, actor_headers, source_video_id)
+    job_id = UUID(job_payload["job_id"])
+
+    async with session_factory() as session:
+        event = await claim_next_outbox_event(session)
+        assert event is not None
+        stale_claimed_at = datetime.now(UTC) - timedelta(minutes=10)
+        stale_lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        event.claimed_at = stale_claimed_at
+        event.lease_expires_at = stale_lease_expires_at
+        await session.commit()
+        stale_event_id = event.id
+
+    monkeypatch.setattr(worker_runtime, "SessionLocal", session_factory)
+    processed = await worker_runtime.process_next_outbox_event(worker_id="reclaim-worker")
+    assert processed is True
+
+    async with session_factory() as session:
+        event = await session.get(OutboxEvent, stale_event_id)
+        assert event is not None
+        assert event.status == OutboxStatus.processed
+        assert event.processed_at is not None
+        assert event.claimed_at is not None
+        assert ensure_aware(event.claimed_at) > stale_claimed_at
+        assert event.lease_expires_at is None
+
+        stage_run = (
+            await session.execute(
+                select(StageRun).where(
+                    StageRun.job_id == job_id,
+                    StageRun.stage_name == StageName.intake,
+                    StageRun.attempt_no == 1,
+                )
+            )
+        ).scalars().one()
+        assert stage_run.status == StageRunStatus.succeeded
+        assert stage_run.worker_id == "reclaim-worker"

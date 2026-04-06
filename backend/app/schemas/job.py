@@ -4,7 +4,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 from app.models.enums import JobStatus, Platform, StageName, StageRunStatus
-from app.schemas.common import AppSchema
+from app.schemas.common import AppSchema, TimestampedOut
 
 
 class CreateJobRequest(BaseModel):
@@ -34,6 +34,50 @@ class JobOut(AppSchema):
     version: int
     created_at: datetime
     updated_at: datetime
+
+
+class JobConfigSnapshotOut(TimestampedOut):
+    id: UUID
+    job_id: UUID
+    version_no: int
+    is_current: bool
+    checksum: str
+    target_final_clip_count: int
+    shortlist_target_count: int
+    prompt_version: str
+    scoring_policy_version: str
+    config_jsonb: dict
+
+
+class JobStageSummaryOut(AppSchema):
+    stage_name: StageName
+    latest_stage_run_id: UUID
+    latest_attempt_no: int
+    latest_status: StageRunStatus
+    latest_started_at: datetime | None
+    latest_ended_at: datetime | None
+    latest_error_code: str | None
+
+
+class JobOutputCountsOut(AppSchema):
+    transcript_revision_count: int = 0
+    transcript_segment_count: int = 0
+    transcript_word_count: int = 0
+    candidate_set_count: int = 0
+    candidate_clip_count: int = 0
+
+
+class JobApprovalStateOut(AppSchema):
+    shortlist_review: str
+    final_approval: str
+
+
+class JobDetailOut(JobOut):
+    current_job_config_snapshot_id: UUID | None = None
+    current_config_snapshot: JobConfigSnapshotOut | None = None
+    stage_summary: list[JobStageSummaryOut] = Field(default_factory=list)
+    output_counts: JobOutputCountsOut = Field(default_factory=JobOutputCountsOut)
+    current_approval_state: JobApprovalStateOut
 
 
 class StageRunOut(AppSchema):

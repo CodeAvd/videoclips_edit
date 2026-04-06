@@ -232,6 +232,9 @@
 ### Goal
 
 - Turn the ranked shortlist into preview renders and then final masters.
+- Gate before starting `M3`:
+  - live Postgres smoke for `upload -> ranking` must be green
+  - a persisted benchmark comparison artifact must exist for the active `prompt_version` and `scoring_policy_version`
 
 ### Issues
 

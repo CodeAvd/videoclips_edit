@@ -24,6 +24,25 @@ class ArtifactKind(StrEnum):
     stage_artifact = "stage_artifact"
 
 
+class SourceVideoArtifactRole(StrEnum):
+    source_asset = "source_asset"
+    canonical_video = "canonical_video"
+    proxy_video = "proxy_video"
+    normalized_audio = "normalized_audio"
+    thumbnails = "thumbnails"
+
+
+class EvalSetStatus(StrEnum):
+    draft = "draft"
+    frozen = "frozen"
+    archived = "archived"
+
+
+class CandidateLabelValue(StrEnum):
+    accept = "accept"
+    reject = "reject"
+
+
 class Platform(StrEnum):
     youtube_shorts = "youtube_shorts"
     instagram_reels = "instagram_reels"

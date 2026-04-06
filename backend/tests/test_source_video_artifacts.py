@@ -3,6 +3,7 @@ from uuid import UUID
 from sqlalchemy import select
 
 from app.models.job import SourceVideo, SourceVideoArtifact
+from app.services.source_video_artifacts import get_preferred_video_artifact
 from flow_helpers import run_job_pipeline_smoke
 
 
@@ -37,3 +38,8 @@ async def test_ingest_keeps_source_asset_and_registers_canonical_video_role(
     assert by_role["canonical_video"] != source_video.canonical_asset_id
     assert "normalized_audio" in by_role
     assert "thumbnails" in by_role
+
+    async with session_factory() as session:
+        preferred_video_artifact = await get_preferred_video_artifact(session, source_video_id=source_video_id)
+
+    assert preferred_video_artifact.id == by_role["canonical_video"]

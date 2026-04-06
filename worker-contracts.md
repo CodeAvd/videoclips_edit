@@ -10,6 +10,7 @@
 
 - Only one active `StageRun` may exist per `(job_id, stage_name)`.
 - Workers must claim a lease before running and renew it while work is active.
+- Lease heartbeats may extend execution only for the owning `(worker_id, lease_token)` pair, and expired claimed outbox work must be reclaimable.
 - All stage side effects must be derived from durable DB rows, never transient memory.
 - Stage transitions use compare-and-swap semantics on `job.version` and the relevant execution record.
 - Preview-first review is mandatory. Final renders do not start until shortlist approval completes.

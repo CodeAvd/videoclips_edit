@@ -161,7 +161,24 @@ async def run_job_pipeline_smoke(
 
     job_response = await client.get(f"/api/v1/jobs/{first_job['job_id']}", headers=actor_headers)
     assert job_response.status_code == 200
-    assert job_response.json()["status"] == "awaiting_shortlist_review"
+    job_payload = job_response.json()
+    assert job_payload["status"] == "awaiting_shortlist_review"
+    assert job_payload["current_job_config_snapshot_id"] == first_job["current_job_config_snapshot_id"]
+    assert job_payload["current_config_snapshot"]["prompt_version"] == "v1"
+    assert job_payload["current_config_snapshot"]["scoring_policy_version"] == "v1"
+    stage_summary = {item["stage_name"]: item for item in job_payload["stage_summary"]}
+    assert stage_summary["intake"]["latest_status"] == "succeeded"
+    assert stage_summary["ingest"]["latest_status"] == "succeeded"
+    assert stage_summary["transcript"]["latest_status"] == "succeeded"
+    assert stage_summary["feature_extract"]["latest_status"] == "succeeded"
+    assert stage_summary["ranking"]["latest_status"] == "succeeded"
+    assert job_payload["output_counts"]["transcript_revision_count"] == 1
+    assert job_payload["output_counts"]["transcript_segment_count"] > 0
+    assert job_payload["output_counts"]["transcript_word_count"] > 0
+    assert job_payload["output_counts"]["candidate_set_count"] == 1
+    assert 5 <= job_payload["output_counts"]["candidate_clip_count"] <= 80
+    assert job_payload["current_approval_state"]["shortlist_review"] == "awaiting_review"
+    assert job_payload["current_approval_state"]["final_approval"] == "not_ready"
 
     stage_runs_response = await client.get(f"/api/v1/jobs/{first_job['job_id']}/stage-runs", headers=actor_headers)
     assert stage_runs_response.status_code == 200

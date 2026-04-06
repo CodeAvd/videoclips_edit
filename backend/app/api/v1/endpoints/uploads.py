@@ -162,7 +162,7 @@ async def complete_upload_session(
 @router.get(
     "/{upload_id}",
     response_model=UploadSessionOut,
-    dependencies=[Depends(require_role(ActorRole.admin, ActorRole.operator, ActorRole.viewer))],
+    dependencies=[Depends(require_role(ActorRole.admin, ActorRole.operator, ActorRole.reviewer, ActorRole.viewer))],
 )
 async def get_upload_session(upload_id: UUID, db: DbSession, storage: Storage) -> UploadSessionOut:
     upload = await db.get(UploadSession, upload_id)

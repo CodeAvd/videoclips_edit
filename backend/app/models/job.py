@@ -21,6 +21,8 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.models.base import BaseModel, CreatedAtMixin, UpdatedAtMixin, UuidPrimaryKeyMixin
 from app.models.enums import (
     ArtifactKind,
+    CandidateLabelValue,
+    EvalSetStatus,
     IngestStatus,
     JobStatus,
     OutboxStatus,
@@ -245,6 +247,50 @@ class StageRunArtifact(CreatedAtMixin, BaseModel):
     stage_run_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("stage_run.id"), primary_key=True)
     artifact_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("artifact_object.id"), primary_key=True)
     role: Mapped[str] = mapped_column(String(64), primary_key=True)
+
+
+class EvalSet(UuidPrimaryKeyMixin, CreatedAtMixin, BaseModel):
+    __tablename__ = "eval_set"
+
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[EvalSetStatus] = mapped_column(Enum(EvalSetStatus, native_enum=False), nullable=False)
+
+
+class EvalSetMember(CreatedAtMixin, BaseModel):
+    __tablename__ = "eval_set_member"
+
+    eval_set_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("eval_set.id"), primary_key=True)
+    source_video_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("source_video.id"), primary_key=True)
+
+
+class CandidateLabel(UuidPrimaryKeyMixin, CreatedAtMixin, BaseModel):
+    __tablename__ = "candidate_label"
+
+    eval_set_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("eval_set.id"), nullable=False)
+    source_video_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("source_video.id"), nullable=False)
+    start_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    end_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    label: Mapped[CandidateLabelValue] = mapped_column(Enum(CandidateLabelValue, native_enum=False), nullable=False)
+    actor_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text)
+
+
+class BenchmarkRun(UuidPrimaryKeyMixin, CreatedAtMixin, BaseModel):
+    __tablename__ = "benchmark_run"
+
+    eval_set_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("eval_set.id"), nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    scoring_policy_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    artifact_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True), ForeignKey("artifact_object.id"))
+
+
+class BenchmarkResult(UuidPrimaryKeyMixin, CreatedAtMixin, BaseModel):
+    __tablename__ = "benchmark_result"
+
+    benchmark_run_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("benchmark_run.id"), nullable=False)
+    source_video_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("source_video.id"), nullable=False)
+    metric_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    metric_value: Mapped[float] = mapped_column(Numeric(12, 4), nullable=False)
 
 
 class CandidateSet(UuidPrimaryKeyMixin, CreatedAtMixin, BaseModel):

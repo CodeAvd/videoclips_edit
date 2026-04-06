@@ -1,7 +1,7 @@
 """m2_smart_clipping
 
 Revision ID: 0003_m2_smart_clipping
-Revises: 0002_idempotency_outbox_reliability
+Revises: 0002_outbox_reliability
 Create Date: 2026-04-05 00:45:00.000000
 """
 
@@ -11,7 +11,7 @@ from sqlalchemy.dialects import postgresql
 
 
 revision = "0003_m2_smart_clipping"
-down_revision = "0002_idempotency_outbox_reliability"
+down_revision = "0002_outbox_reliability"
 branch_labels = None
 depends_on = None
 

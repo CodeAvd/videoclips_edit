@@ -2,6 +2,7 @@ from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy import pool
+from sqlalchemy.engine import make_url
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
@@ -17,6 +18,14 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata
+
+
+def build_postgres_connect_args(database_url: str) -> dict[str, object]:
+    url = make_url(database_url)
+    host = (url.host or "").lower()
+    if host in {"localhost", "127.0.0.1"}:
+        return {"ssl": False}
+    return {}
 
 
 def run_migrations_offline() -> None:
@@ -41,6 +50,7 @@ async def run_migrations_online() -> None:
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        connect_args=build_postgres_connect_args(settings.database_url),
     )
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)
