@@ -30,6 +30,9 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+  "postgres: requires POSTGRES_TEST_DATABASE_URL pointing at a disposable Postgres database",
+]
 
 [tool.setuptools.packages.find]
 include = ["app*"]

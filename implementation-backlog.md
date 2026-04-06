@@ -87,6 +87,7 @@
   - `outbox_event`
 - Acceptance:
   - stage completions enqueue next-stage work through outbox
+  - retryable stage failures close the current attempt and enqueue a new `StageRun(attempt_no + 1)`
   - publish side effects cannot happen without a durable record
 
 #### `M0-6 Reason codes, artifact lineage, and eval groundwork`
@@ -159,7 +160,7 @@
   - `stage_run_artifact`
 - Acceptance:
   - intake gate checks duration, language, audio quality, spoken-video scope, and provenance before ingest proceeds
-  - canonical asset, normalized audio, proxy, and thumbnails are produced
+  - original source linkage remains immutable while `canonical_video`, normalized audio, proxy, and thumbnails are produced through `source_video_artifact`
   - transient media failures retry cleanly
 
 #### `M1-5 Transcript worker`

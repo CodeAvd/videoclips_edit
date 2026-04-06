@@ -1,4 +1,6 @@
 import asyncio
+from contextlib import suppress
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
@@ -22,8 +24,22 @@ from app.models.job import (
     TranscriptSegment,
     TranscriptWord,
 )
-from app.repositories.outbox import claim_next_outbox_event, mark_outbox_failed, mark_outbox_processed
-from app.repositories.stage_runs import block_stage_run, claim_stage_run, fail_stage_run, get_stage_run, succeed_stage_run
+from app.repositories.outbox import (
+    claim_next_outbox_event,
+    compute_backoff_seconds,
+    mark_outbox_failed,
+    mark_outbox_processed,
+    renew_outbox_lease,
+)
+from app.repositories.stage_runs import (
+    LEASE_SECONDS,
+    block_stage_run,
+    claim_stage_run,
+    fail_stage_run,
+    get_stage_run,
+    renew_stage_run_lease,
+    succeed_stage_run,
+)
 from app.services.candidate_ranker import rank_candidates
 from app.services.feature_extract import (
     build_active_speaker_track,
@@ -51,6 +67,80 @@ def classify_outbox_failure(exc: Exception) -> tuple[bool, str, str]:
         is_retryable = exc.retryable or exc.http_status >= 500
         return is_retryable, exc.code, exc.message
     return True, exc.__class__.__name__, str(exc)
+
+
+def compute_lease_heartbeat_interval_seconds() -> float:
+    shortest_ttl = min(float(settings.outbox_claim_ttl_seconds), float(LEASE_SECONDS))
+    return max(1.0, min(shortest_ttl / 3, 30.0))
+
+
+async def renew_claimed_execution_leases(
+    *,
+    event_id: UUID,
+    job_id: UUID,
+    stage_name: StageName,
+    attempt_no: int,
+    worker_id: str,
+    lease_token: str | None = None,
+) -> str | None:
+    async with SessionLocal() as heartbeat_session:
+        try:
+            await renew_outbox_lease(heartbeat_session, event_id=event_id)
+            try:
+                stage_run = await get_stage_run(heartbeat_session, job_id, stage_name, attempt_no)
+            except AppError:
+                stage_run = None
+            if (
+                stage_run is not None
+                and stage_run.status == StageRunStatus.running
+                and stage_run.worker_id == worker_id
+                and stage_run.lease_token is not None
+            ):
+                current_token = lease_token or stage_run.lease_token
+                if stage_run.lease_token == current_token:
+                    renewed = await renew_stage_run_lease(
+                        heartbeat_session,
+                        stage_run_id=stage_run.id,
+                        lease_token=current_token,
+                    )
+                    if renewed:
+                        lease_token = current_token
+            await heartbeat_session.commit()
+        except Exception:
+            await heartbeat_session.rollback()
+        return lease_token
+
+
+async def maintain_execution_leases(
+    *,
+    event_id: UUID,
+    job_id: UUID,
+    stage_name: StageName,
+    attempt_no: int,
+    worker_id: str,
+    stop_event: asyncio.Event,
+) -> None:
+    lease_token: str | None = None
+    while not stop_event.is_set():
+        await asyncio.sleep(compute_lease_heartbeat_interval_seconds())
+        if stop_event.is_set():
+            return
+        lease_token = await renew_claimed_execution_leases(
+            event_id=event_id,
+            job_id=job_id,
+            stage_name=stage_name,
+            attempt_no=attempt_no,
+            worker_id=worker_id,
+            lease_token=lease_token,
+        )
+
+
+async def stop_lease_heartbeat(stop_event: asyncio.Event, heartbeat_task: asyncio.Task[None]) -> None:
+    stop_event.set()
+    if not heartbeat_task.done():
+        heartbeat_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await heartbeat_task
 
 
 async def create_artifact_from_bytes(
@@ -251,6 +341,7 @@ async def handle_ingest(job_id: UUID, attempt_no: int, *, worker_id: str, sessio
     source_video = await session.get(SourceVideo, job.source_video_id)
     stage_run = await claim_stage_run(session, job_id=job_id, stage_name=StageName.ingest, attempt_no=attempt_no, worker_id=worker_id)
     source_video.ingest_status = IngestStatus.processing
+    await session.commit()
     source_asset = await get_source_video_artifact(session, source_video_id=source_video.id, role="source_asset")
     storage = get_storage_service()
     source_bytes = storage.read_bytes(storage_key=source_asset.storage_key)
@@ -264,7 +355,7 @@ async def handle_ingest(job_id: UUID, attempt_no: int, *, worker_id: str, sessio
 
     derived_artifacts = [
         (
-            "normalized_audio",
+            ("normalized_audio",),
             ArtifactKind.normalized_audio,
             f"derived/{source_video.id}/audio.wav",
             "audio/wav",
@@ -272,7 +363,7 @@ async def handle_ingest(job_id: UUID, attempt_no: int, *, worker_id: str, sessio
             {"source_video_id": str(source_video.id), "role": "normalized_audio", "probe_duration_ms": ingest_output.probe.duration_ms},
         ),
         (
-            "thumbnails",
+            ("thumbnails",),
             ArtifactKind.thumbnails,
             f"derived/{source_video.id}/thumbnails.json",
             "application/json",
@@ -283,7 +374,7 @@ async def handle_ingest(job_id: UUID, attempt_no: int, *, worker_id: str, sessio
     if ingest_output.proxy_video_bytes:
         derived_artifacts.append(
             (
-                "proxy_video",
+                ("proxy_video", "canonical_video"),
                 ArtifactKind.proxy_video,
                 f"derived/{source_video.id}/proxy.mp4",
                 "video/mp4",
@@ -292,7 +383,7 @@ async def handle_ingest(job_id: UUID, attempt_no: int, *, worker_id: str, sessio
             )
         )
 
-    for role, kind, storage_key, mime_type, body, metadata_jsonb in derived_artifacts:
+    for roles, kind, storage_key, mime_type, body, metadata_jsonb in derived_artifacts:
         if body is None:
             artifact = await create_artifact_from_json(
                 session=session,
@@ -310,7 +401,8 @@ async def handle_ingest(job_id: UUID, attempt_no: int, *, worker_id: str, sessio
                 body=body,
                 metadata_jsonb=metadata_jsonb,
             )
-        session.add(SourceVideoArtifact(source_video_id=source_video.id, artifact_id=artifact.id, role=role))
+        for role in roles:
+            session.add(SourceVideoArtifact(source_video_id=source_video.id, artifact_id=artifact.id, role=role))
 
     evidence = await create_artifact_from_json(
         session=session,
@@ -320,7 +412,7 @@ async def handle_ingest(job_id: UUID, attempt_no: int, *, worker_id: str, sessio
             "job_id": str(job.id),
             "stage_run_id": str(stage_run.id),
             "stage_name": StageName.ingest.value,
-            "artifacts": ["normalized_audio", "proxy_video", "thumbnails"],
+            "artifacts": ["normalized_audio", "proxy_video", "canonical_video", "thumbnails"],
             "probe": {
                 "duration_ms": ingest_output.probe.duration_ms,
                 "has_video": ingest_output.probe.has_video,
@@ -346,6 +438,7 @@ async def handle_transcript(job_id: UUID, attempt_no: int, *, worker_id: str, se
     job = await session.get(Job, job_id)
     source_video = await session.get(SourceVideo, job.source_video_id)
     stage_run = await claim_stage_run(session, job_id=job_id, stage_name=StageName.transcript, attempt_no=attempt_no, worker_id=worker_id)
+    await session.commit()
     audio_artifact = await get_source_video_artifact(session, source_video_id=source_video.id, role="normalized_audio")
     storage = get_storage_service()
     transcript_payload = await transcribe_with_fallback(
@@ -430,6 +523,7 @@ async def handle_feature_extract(job_id: UUID, attempt_no: int, *, worker_id: st
     job = await session.get(Job, job_id)
     source_video = await session.get(SourceVideo, job.source_video_id)
     stage_run = await claim_stage_run(session, job_id=job_id, stage_name=StageName.feature_extract, attempt_no=attempt_no, worker_id=worker_id)
+    await session.commit()
     revision = await get_current_transcript_revision(session, job_id=job.id)
     words = await list_transcript_words(session, transcript_revision_id=revision.id)
     segments = await list_transcript_segments(session, transcript_revision_id=revision.id)
@@ -480,6 +574,7 @@ async def handle_feature_extract(job_id: UUID, attempt_no: int, *, worker_id: st
 async def handle_ranking(job_id: UUID, attempt_no: int, *, worker_id: str, session) -> None:
     job = await session.get(Job, job_id)
     stage_run = await claim_stage_run(session, job_id=job_id, stage_name=StageName.ranking, attempt_no=attempt_no, worker_id=worker_id)
+    await session.commit()
     revision = await get_current_transcript_revision(session, job_id=job.id)
     words = await list_transcript_words(session, transcript_revision_id=revision.id)
     segments = await list_transcript_segments(session, transcript_revision_id=revision.id)
@@ -610,46 +705,72 @@ async def process_next_outbox_event(*, worker_id: str) -> bool:
         event = await claim_next_outbox_event(session)
         if event is None:
             return False
+        await session.commit()
         event_id = event.id
+        job_id, stage_name, attempt_no = parse_event_payload(event.payload_jsonb)
+        stop_heartbeat = asyncio.Event()
+        heartbeat_task = asyncio.create_task(
+            maintain_execution_leases(
+                event_id=event_id,
+                job_id=job_id,
+                stage_name=stage_name,
+                attempt_no=attempt_no,
+                worker_id=worker_id,
+                stop_event=stop_heartbeat,
+            )
+        )
         try:
             await dispatch_outbox_event(event, worker_id=worker_id, session=session)
+            await stop_lease_heartbeat(stop_heartbeat, heartbeat_task)
             await mark_outbox_processed(session, event)
             await session.commit()
             return True
         except Exception as exc:
+            await stop_lease_heartbeat(stop_heartbeat, heartbeat_task)
             await session.rollback()
             retryable, error_code, error_message = classify_outbox_failure(exc)
             async with SessionLocal() as retry_session:
                 retry_event = await retry_session.get(type(event), event_id)
                 if retry_event is not None:
-                    await mark_outbox_failed(
+                    next_retry_count = await mark_outbox_failed(
                         retry_session,
                         retry_event,
                         error_code=error_code,
                         error_message=error_message,
-                        retryable=retryable,
                     )
-                    if not retryable:
-                        job_id, stage_name, attempt_no = parse_event_payload(retry_event.payload_jsonb)
-                        try:
-                            stage_run = await get_stage_run(retry_session, job_id, stage_name, attempt_no)
-                        except AppError:
-                            stage_run = None
-                        if stage_run is not None:
-                            await fail_stage_run(retry_session, stage_run, error_code=error_code, retryable=False)
-                            job = await retry_session.get(Job, job_id)
-                            if job is not None and job.status not in {JobStatus.failed, JobStatus.cancelled}:
-                                await transition_job_status(
-                                    retry_session,
-                                    job=job,
-                                    to_status=JobStatus.failed,
-                                    stage_run_id=stage_run.id,
-                                    actor_type="worker",
-                                    actor_ref=worker_id,
-                                    reason_code=error_code,
-                                )
+                    should_retry = retryable and next_retry_count <= retry_event.max_retries
+                    try:
+                        stage_run = await get_stage_run(retry_session, job_id, stage_name, attempt_no)
+                    except AppError:
+                        stage_run = None
+                    if stage_run is not None:
+                        await fail_stage_run(retry_session, stage_run, error_code=error_code, retryable=should_retry)
+                    if should_retry:
+                        await enqueue_stage(
+                            retry_session,
+                            job_id=job_id,
+                            stage_name=stage_name,
+                            available_at=datetime.now(UTC) + timedelta(seconds=compute_backoff_seconds(next_retry_count)),
+                            retry_count=next_retry_count,
+                            max_retries=retry_event.max_retries,
+                        )
+                    else:
+                        job = await retry_session.get(Job, job_id)
+                        if job is not None and job.status not in {JobStatus.failed, JobStatus.cancelled}:
+                            await transition_job_status(
+                                retry_session,
+                                job=job,
+                                to_status=JobStatus.failed,
+                                stage_run_id=stage_run.id if stage_run is not None else None,
+                                actor_type="worker",
+                                actor_ref=worker_id,
+                                reason_code=error_code,
+                            )
                     await retry_session.commit()
             raise
+        finally:
+            with suppress(Exception):
+                await stop_lease_heartbeat(stop_heartbeat, heartbeat_task)
 
 
 async def run_worker_loop(*, worker_id: str, poll_interval_seconds: float, once: bool, max_events: int | None) -> None:

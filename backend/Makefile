@@ -1,4 +1,4 @@
-.PHONY: dev-up dev-down migrate api worker test
+.PHONY: dev-up dev-down migrate api worker test test-postgres-smoke
 
 dev-up:
 	docker compose up -d
@@ -17,3 +17,6 @@ worker:
 
 test:
 	uv run pytest
+
+test-postgres-smoke:
+	uv run pytest tests/test_postgres_migration_smoke.py -m postgres -q

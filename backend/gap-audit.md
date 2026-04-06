@@ -16,9 +16,11 @@
 - Upload completion now validates the stored object against both declared upload metadata and completion payload metadata.
 - Worker-generated ingest and transcript artifacts are written through the storage layer, not only registered as DB rows.
 - Raw source linkage is persisted through `source_video_artifact(role='source_asset')`.
+- `source_video.canonical_asset_id` now stays pinned to the original source artifact, while ingest registers normalized video access through `source_video_artifact(role='canonical_video')`.
 - Canonical job checksum behavior is covered by tests for stable target-platform ordering.
 - First-class API idempotency is implemented for `POST /jobs`, `POST /jobs/{id}/actions/resolve-intake-review`, and `POST /uploads/{id}/complete`.
-- Retryable outbox failures now requeue with backoff and persist error metadata; terminal failures mark both `outbox_event` and `stage_run` predictably.
+- Retryable stage failures now close the current `outbox_event` and `stage_run`, then enqueue a new delayed `StageRun` attempt with incremented `attempt_no`.
+- Worker execution now commits claims before long-running work, renews both stage and outbox leases while work is active, and deterministically reclaims expired claimed/running `StageRun`s.
 - SQLite-backed API/worker regression tests now cover upload completion, idempotent job creation, and retry vs terminal outbox behavior.
 - `ingest` now uses real `ffmpeg` processing for normalized audio and proxy generation instead of stub media bytes.
 - `transcript` now goes through a provider abstraction with `Groq -> OpenAI -> Stub` fallback and persists normalized `transcript_revision`, `transcript_word`, and `transcript_segment` output plus raw ASR payload artifacts.
@@ -40,22 +42,6 @@
     - `tests/conftest.py`
     - `docker-compose.yml`
 
-- `canonical_asset_id` semantics are still overloaded.
-  - Current state: `source_video.canonical_asset_id` points at the uploaded source artifact before ingest finishes.
-  - Risk: later workers and review surfaces can treat the raw source as the normalized canonical media.
-  - Localized in:
-    - `app/models/job.py`
-    - `app/api/v1/endpoints/source_videos.py`
-    - `app/services/worker_runtime.py`
-
-- Outbox delivery is not yet durable enough for retry-heavy media stages.
-  - Current state: retry counters and backoff now exist, and `ffmpeg` is now real, but there is still no active lease renewal heartbeat for genuinely long-running media or ASR stages.
-  - Risk: real `ffmpeg` or ASR stages can still outgrow the current claim window once stage execution stops being stub-fast.
-  - Localized in:
-    - `app/models/job.py`
-    - `app/repositories/outbox.py`
-    - `app/services/worker_runtime.py`
-
 ### P1
 
 - Idempotency is still partial.
@@ -73,6 +59,14 @@
     - `app/services/storage.py`
     - `.env.example`
     - `README.md`
+
+- Preview/final-render media consumers are not implemented yet, but their source-of-truth is now fixed.
+  - Current state: `canonical_asset_id` remains the original source pointer, and normalized video access now flows through `source_video_artifact(role='canonical_video')`.
+  - Remaining risk: future `M3` code must read `canonical_video` rather than falling back to the raw source asset.
+  - Localized in:
+    - `app/models/job.py`
+    - `app/api/v1/endpoints/source_videos.py`
+    - `app/services/worker_runtime.py`
 
 - Offline eval harness is still missing.
   - Current state: ranking is now implemented, but `eval_set`, `eval_set_member`, and `candidate_label` are still docs-only.
@@ -95,26 +89,31 @@
 
 ### Closure Plan 1: Canonical Media Split
 
-- Add explicit raw source vs normalized artifact roles.
-- Keep `canonical_asset_id` as the currently registered source pointer for now, but treat normalized outputs as `source_video_artifact` roles:
+- Closed for the current `M0-M2` path.
+- `canonical_asset_id` remains the immutable original source pointer.
+- Normalized outputs are resolved through `source_video_artifact` roles:
   - `normalized_audio`
   - `proxy_video`
+  - `canonical_video`
   - `thumbnails`
-  - future: `canonical_video`
-- When the real ingest stage lands, either:
-  - introduce `raw_asset_id`, or
-  - migrate `canonical_asset_id` to point to the first normalized canonical video artifact.
+- Future preview/final-render stages must consume `canonical_video` rather than `canonical_asset_id`.
 
 ### Closure Plan 2: Durable Outbox + Lease Renewal
 
-- Extend `outbox_event` with:
+- Closed for the current worker runtime.
+- `outbox_event` now records:
   - `retry_count`
   - `max_retries`
   - `last_error_code`
   - `last_error_message`
-  - `next_attempt_at`
-- Replace terminal `failed` writes with scheduled retries for retryable stage failures.
-- Add stage lease renewal in the worker loop now that real media stages exist.
+- Retryable failures now:
+  - mark the current `outbox_event` as failed with error metadata
+  - mark the current `StageRun` as `failed_retryable`
+  - enqueue a new delayed stage attempt with incremented `attempt_no`
+- The worker loop now:
+  - commits claims before long-running execution
+  - renews stage and outbox leases while work is active
+  - reclaims expired claimed/running stage leases deterministically
 
 ### Closure Plan 3: First-Class Idempotency
 
@@ -166,5 +165,5 @@
 
 - Do not add `M2` ranking work before DB-backed integration tests exist.
 - Do not extend `M2` ranking heuristics before DB-backed integration tests and an eval harness exist.
-- Do not ship preview/final render before the outbox retry/lease model is extended for long-running stages.
+- Do not ship preview/final render before live Postgres smoke exists and the new stages consume `source_video_artifact(role='canonical_video')`.
 - Do not expand publish/approval surfaces before first-class idempotency is in place.

@@ -2,7 +2,7 @@ from sqlalchemy import select
 
 from app.models.job import ApiIdempotencyKey
 
-from test_jobs_worker_flow import create_uploaded_source_video
+from flow_helpers import create_uploaded_source_video
 
 
 async def test_create_job_replays_completed_response_for_same_idempotency_key(client, actor_headers, session_factory) -> None:

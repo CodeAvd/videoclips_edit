@@ -71,11 +71,15 @@
 - Trigger:
   - accepted intake
 - Reads:
-  - source asset from `artifact_object`
+  - source asset via `source_video_artifact(role='source_asset')`
   - `brand_profile`
 - Writes:
-  - normalized canonical asset if needed
-  - proxy, audio, thumbnails via `source_video_artifact`
+  - keep `source_video.canonical_asset_id` pinned to the original owned source asset
+  - normalized media via `source_video_artifact`:
+    - `normalized_audio`
+    - `proxy_video`
+    - `canonical_video` when normalized video exists
+    - `thumbnails`
   - `stage_run_artifact` for logs or diagnostics
   - `outbox_event` for `transcript`
 - Retryable failures:
@@ -89,8 +93,8 @@
 - Trigger:
   - completed ingest
 - Reads:
-  - canonical source asset
-  - normalized audio
+  - original source asset via `source_video_artifact(role='source_asset')` when provenance context is needed
+  - normalized audio via `source_video_artifact(role='normalized_audio')`
 - Writes:
   - `transcript_revision`
   - `transcript_word`
@@ -110,8 +114,8 @@
   - current transcript revision available
 - Reads:
   - current transcript revision
-  - proxy or canonical video
-  - audio track
+  - normalized video via `source_video_artifact(role='canonical_video')` or `proxy_video`
+  - normalized audio via `source_video_artifact(role='normalized_audio')`
 - Writes:
   - transcript turn boundaries normalized for scoring
   - audio energy features for each relevant segment window
@@ -321,7 +325,7 @@ The contracts below are part of the execution graph, but they are not separate `
 
 ## Retry Policy
 
-- Retryable failures create a new `StageRun` with incremented `attempt_no`.
+- Retryable failures mark the current `StageRun` as `failed_retryable`, preserve its artifacts, and create a new `StageRun` with incremented `attempt_no`.
 - Terminal failures end the current branch and must write a reason code.
 - Publish retries create a new `PublishAttempt`, not a new `PublishIntent`.
 - QA regenerate creates a new `RenderAttempt` and new `QaRun`, but keeps the same logical final `render_variant`.

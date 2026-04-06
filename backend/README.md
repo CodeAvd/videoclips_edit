@@ -38,6 +38,7 @@ uv run python worker.py
 - Real `ffmpeg`-based ingest for normalized audio and proxy generation
 - Transcript provider abstraction with `Groq -> OpenAI -> Stub` fallback order
 - Deterministic feature extraction and ranked `candidate_set/candidate_clip` persistence
+- Opt-in Postgres migration smoke test for the `upload -> ranking` worker flow
 
 ## Dev Auth
 
@@ -58,6 +59,7 @@ If omitted, the app falls back to the configured default dev actor.
 
 - The filesystem storage backend is intended for local development and tests.
 - Production-style direct object upload still belongs behind presigned object-storage URLs.
+- The Postgres smoke test requires `ffmpeg` in the test environment because it generates a sample source video.
 
 ## Storage Backends
 
@@ -80,6 +82,28 @@ Transcription uses the normalized provider chain configured via environment:
 
 For offline development and tests, set `ASR_PROVIDER_PRIMARY=stub`.
 
+## Postgres Migration Smoke
+
+Use an explicitly disposable Postgres database and pass it through `POSTGRES_TEST_DATABASE_URL`.
+The test fixture resets the `public` schema before running Alembic migrations, so do not point it at any non-test database.
+Use a database name that clearly includes a disposable token such as `_test`, `_smoke`, `_tmp`, or `_sandbox`.
+
+```bash
+POSTGRES_TEST_DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/ai_shorts_engine_test uv run pytest tests/test_postgres_migration_smoke.py -m postgres -q
+```
+
+Or via `make`:
+
+```bash
+POSTGRES_TEST_DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/ai_shorts_engine_test make test-postgres-smoke
+```
+
+Behavior notes:
+
+- if `POSTGRES_TEST_DATABASE_URL` is absent, the Postgres smoke test is skipped explicitly;
+- the test never falls back to SQLite;
+- Docker or `docker compose` can be used to provide Postgres externally, but pytest does not invoke Docker itself.
+
 ## Audit
 
-The current implementation gap log and closure plan live in [gap-audit.md](/Users/grisaavdeev/Downloads/thumbnails/projects/2026-04-04-ai-shorts-engine/backend/gap-audit.md).
+The current implementation gap log and closure plan live in [gap-audit.md](gap-audit.md).
