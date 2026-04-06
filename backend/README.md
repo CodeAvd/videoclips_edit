@@ -42,6 +42,7 @@ uv run python worker.py
 - Transcript provider abstraction with `Groq -> OpenAI -> Stub` fallback order
 - Deterministic feature extraction and ranked `candidate_set/candidate_clip` persistence
 - Internal offline eval harness with persisted benchmark comparison artifacts
+- Internal offline reference-intelligence lane for canonical shorts, with manifest-driven analysis, local-first frame sampling, OCR evidence, and preset bundle generation
 - Opt-in Postgres migration smoke test for the `upload -> ranking` worker flow
 
 ## Auth Modes
@@ -150,6 +151,55 @@ The eval gate is satisfied only when:
 - the eval set is frozen;
 - a `benchmark_run` exists for the active `prompt_version` and `scoring_policy_version`;
 - that run has persisted `benchmark_result` rows and a comparison artifact.
+
+## Reference Intelligence Lane
+
+Canonical reference shorts now have a separate offline lane under `..\experiments\autoresearch`.
+It is intentionally outside the production API/worker runtime and is meant to generate manual presets, not mutate production defaults.
+The lane is local-first and frames-first: use deterministic metadata/scene/OCR extraction first, then optionally classify sampled frame packs with an external multimodal provider.
+Do not analyze every frame or run a whole-video multimodal pass.
+
+Reference collection contract:
+
+- `references/<collection>/manifest.json|csv`
+- `references/<collection>/videos/...`
+- optional manifest-declared sidecars for subtitles or transcripts
+
+Outputs:
+
+- `reference_manifest.lock.json`
+- `reference_sampling_map.json`
+- `reference_ocr_report.json`
+- `reference_style_report.json`
+- `reference_clusters.json`
+- `preset_bundle.json`
+- `comparison_report.json` when both benchmark payloads already exist
+
+Run from `backend/`:
+
+```bash
+REFERENCE_COLLECTION_DIR=..\references\my-pack OUTPUT_DIR=..\references\my-pack\outputs PRESET_NAME=my-pack-v1 PROMPT_VERSION=v1 SCORING_POLICY_VERSION=v1 make reference-intelligence
+```
+
+Optional OCR/VLM switches are passed through the same target:
+
+```bash
+REFERENCE_COLLECTION_DIR=..\references\my-pack OUTPUT_DIR=..\references\my-pack\outputs PRESET_NAME=my-pack-v1 PROMPT_VERSION=v1 SCORING_POLICY_VERSION=v1 OCR_PROVIDER=auto VLM_PROVIDER=openai VLM_MODEL=<vision-model> OPENAI_API_KEY=<key> make reference-intelligence
+```
+
+To emit a comparison report when both benchmark payloads already exist:
+
+```bash
+REFERENCE_COLLECTION_DIR=..\references\my-pack OUTPUT_DIR=..\references\my-pack\outputs PRESET_NAME=my-pack-v1 PROMPT_VERSION=v1 SCORING_POLICY_VERSION=preset-my-pack-v1 BASELINE_BENCHMARK_PATH=..\tmp\baseline.json CANDIDATE_BENCHMARK_PATH=..\tmp\candidate.json make reference-intelligence-benchmark
+```
+
+Safety rules:
+
+- reference videos are analysis-only and never reused as footage
+- new presets do not change production behavior automatically; any preset that affects ranking-adjacent policy or render/edit hints must be compared against a frozen eval set and backed by a persisted comparison artifact before explicit human enablement
+- external multimodal output is advisory only and does not become a source of truth for runtime ranking or evaluation
+
+See `..\experiments\autoresearch\README.md` for the collection layout and manifest contract.
 
 ## Audit
 
