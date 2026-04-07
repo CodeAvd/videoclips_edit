@@ -7,7 +7,7 @@ name = "ai-shorts-engine-backend"
 version = "0.1.0"
 description = "FastAPI control plane for the AI Shorts Engine v1"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.13"
 dependencies = [
   "alembic>=1.16.0,<2.0.0",
   "asyncpg>=0.30.0,<1.0.0",

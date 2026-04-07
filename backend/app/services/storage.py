@@ -1,10 +1,14 @@
 import hashlib
 import json
+import shutil
+from collections.abc import AsyncIterable
+from contextlib import suppress
 from io import BytesIO
 from dataclasses import dataclass
 from datetime import timedelta
 from functools import lru_cache
 from pathlib import Path
+from uuid import uuid4
 
 from minio import Minio
 from minio.error import S3Error
@@ -42,6 +46,15 @@ class StorageService:
     def write_upload_bytes(self, *, storage_key: str, content_type: str, body: bytes) -> None:
         self.write_bytes(storage_key=storage_key, content_type=content_type, body=body)
 
+    async def write_upload_stream(
+        self,
+        *,
+        storage_key: str,
+        content_type: str,
+        chunks: AsyncIterable[bytes],
+    ) -> None:
+        raise StorageError("Active storage backend does not support streamed app uploads.")
+
     def read_bytes(self, *, storage_key: str) -> bytes:
         raise NotImplementedError
 
@@ -50,6 +63,14 @@ class StorageService:
 
     def read_upload_metadata(self, *, storage_key: str) -> StorageObjectMetadata:
         return self.read_metadata(storage_key=storage_key)
+
+    def local_path_for_key(self, *, storage_key: str) -> Path | None:
+        return None
+
+    def materialize_to_path(self, *, storage_key: str, destination: Path) -> Path:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(self.read_bytes(storage_key=storage_key))
+        return destination
 
     def read_json(self, *, storage_key: str) -> dict | list:
         payload = self.read_bytes(storage_key=storage_key)
@@ -76,6 +97,30 @@ class FilesystemStorageService(StorageService):
         metadata_path.write_text(json.dumps({"content_type": content_type}), encoding="utf-8")
         return self.read_metadata(storage_key=storage_key)
 
+    async def write_upload_stream(
+        self,
+        *,
+        storage_key: str,
+        content_type: str,
+        chunks: AsyncIterable[bytes],
+    ) -> None:
+        target = self._path_for_key(storage_key)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temp_target = target.with_name(f".{target.name}.{uuid4().hex}.part")
+        try:
+            with temp_target.open("wb") as handle:
+                async for chunk in chunks:
+                    if not chunk:
+                        continue
+                    handle.write(chunk)
+            temp_target.replace(target)
+            metadata_path = self._metadata_path_for_key(storage_key)
+            metadata_path.write_text(json.dumps({"content_type": content_type}), encoding="utf-8")
+        except Exception:
+            with suppress(FileNotFoundError):
+                temp_target.unlink()
+            raise
+
     def read_metadata(self, *, storage_key: str) -> StorageObjectMetadata:
         target = self._path_for_key(storage_key)
         if not target.exists():
@@ -99,6 +144,20 @@ class FilesystemStorageService(StorageService):
         if not target.exists():
             raise StorageError(f"Stored object does not exist for key {storage_key}.")
         return target.read_bytes()
+
+    def local_path_for_key(self, *, storage_key: str) -> Path | None:
+        target = self._path_for_key(storage_key)
+        if not target.exists():
+            raise StorageError(f"Stored object does not exist for key {storage_key}.")
+        return target
+
+    def materialize_to_path(self, *, storage_key: str, destination: Path) -> Path:
+        source = self.local_path_for_key(storage_key=storage_key)
+        if source is None:
+            return super().materialize_to_path(storage_key=storage_key, destination=destination)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+        return destination
 
     def _path_for_key(self, storage_key: str) -> Path:
         sanitized = storage_key.lstrip("/")
@@ -174,6 +233,15 @@ class MinioStorageService(StorageService):
         finally:
             response.close()
             response.release_conn()
+
+    def materialize_to_path(self, *, storage_key: str, destination: Path) -> Path:
+        self._ensure_bucket()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self._client.fget_object(self._settings.storage_bucket, storage_key, str(destination))
+        except S3Error as exc:
+            raise StorageError(f"Stored object does not exist for key {storage_key}.") from exc
+        return destination
 
     def _ensure_bucket(self) -> None:
         if self._client.bucket_exists(self._settings.storage_bucket):

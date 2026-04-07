@@ -211,6 +211,106 @@
 - Auth: `reviewer`, `operator`
 - Idempotency: required
 
+### Stage A Proof Harness
+
+This namespace is intentionally separate from the future preview-render and final-approval surface.
+It exists only to prove shortlist quality on a fixed `8`-candidate protocol across `engine`, `manual`, and `vizard`.
+
+#### `POST /proof-harness/eval-sets`
+
+- Purpose: create a dev or holdout proof corpus container.
+- Request:
+  - `name`
+  - `status`
+- Auth: `operator`, `admin`
+
+#### `POST /proof-harness/eval-sets/{eval_set_id}/members`
+
+- Purpose: attach a source video to a proof corpus with holdout metadata.
+- Request:
+  - `source_video_id`
+  - `metadata_jsonb`
+    - expected keys for holdout coverage checks include `split`, `channel_series`, and `content_pattern`
+- Auth: `operator`, `admin`
+
+#### `POST /proof-harness/jobs/{job_id}/engine-shortlist`
+
+- Purpose: snapshot the current engine top-8 shortlist for a job into a proof-safe artifact set.
+- Request:
+  - optional `eval_set_id`
+- Response:
+  - persisted shortlist manifest
+  - `8` normalized candidates with neutral preview excerpt payloads
+- Auth: `operator`, `admin`
+
+#### `POST /proof-harness/source-videos/{source_video_id}/baseline-shortlists`
+
+- Purpose: import a fixed top-8 shortlist for `manual` or `vizard`.
+- Request:
+  - `system_name`: `manual` or `vizard`
+  - optional `eval_set_id`
+  - optional `generation_time_seconds`
+  - `metadata_jsonb`
+  - `candidates[8]`: `{ start_ms, end_ms, rationale_jsonb, duplicate_group?, topic_cluster?, length_bucket?, metadata_jsonb? }`
+- Response:
+  - persisted shortlist manifest
+  - `8` normalized candidates with neutral preview excerpt payloads
+- Auth: `operator`, `admin`
+
+#### `GET /proof-harness/source-videos/{source_video_id}/shortlists`
+
+- Purpose: inspect the current proof shortlists for a source video.
+- Notes:
+  - operator-facing read; this route is not blinded
+- Auth: `operator`, `admin`
+
+#### `POST /proof-harness/review-sessions`
+
+- Purpose: create a blinded `A/B/C` review session over the three current proof shortlists for one source video.
+- Request:
+  - `eval_set_id`
+  - `source_video_id`
+  - optional `is_audit`
+  - optional `time_budget_seconds`
+- Response:
+  - three blinded batches
+  - exactly `8` normalized candidates per batch
+  - no system-of-origin field in batch payloads
+- Auth: `reviewer`, `operator`, `admin`
+
+#### `POST /proof-harness/review-sessions/{proof_review_session_id}/complete`
+
+- Purpose: persist all per-candidate review decisions and the batch-level preference ranking for a blinded session.
+- Request:
+  - `batch_reviews[3]`
+    - `batch_code`
+    - `elapsed_review_seconds`
+    - `candidate_decisions[8]`: `{ proof_shortlist_candidate_id, decision, reject_reason_code?, rationale_helpful, notes? }`
+  - `batch_preference_ranking[3]`
+- Reject reason taxonomy:
+  - `weak_opening`
+  - `late_or_missing_payoff`
+  - `needs_context`
+  - `fragmented_cut`
+  - `duplicate_angle`
+  - `off_topic_or_low_signal`
+  - `review_timeout`
+- Auth: `reviewer`, `operator`, `admin`
+
+#### `POST /proof-harness/comparison-runs`
+
+- Purpose: compute and persist the Stage A stop/go comparison artifact for a frozen eval set.
+- Request:
+  - `eval_set_id`
+- Response:
+  - per-source metrics for `engine`, `manual`, and `vizard`
+  - aggregate medians and reviewer-preference counts
+  - gate payload for holdout pass/fail checks
+- Notes:
+  - only holdout comparison outcomes count for stop/go judgment
+  - dev results remain operational only
+- Auth: `operator`, `admin`
+
 #### `POST /jobs/{job_id}/shortlist-decisions`
 
 - Purpose: persist Gate 1 preview approvals and rejections.

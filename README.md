@@ -243,14 +243,14 @@ Current reference lane status is therefore:
 | `M0 Foundation` | Done | Control plane, schema, auth, orchestration primitives are in place |
 | `M1 Intake + Transcription` | Done | Owned source intake and transcript persistence are implemented |
 | `M2 Candidate Engine` | Done | Feature extraction, ranking, eval harness, and read APIs are working |
-| `Pre-M3 Gate` | Mostly ready | Benchmark gate exists; render should wait for active benchmark evidence and disposable Postgres smoke |
+| `Pre-M3 Gate` | Working | Benchmark gate exists and Stage A proof harness now supports frozen eval sets, blinded `engine/manual/vizard` shortlist review, and persisted stop/go comparison artifacts; render should still wait for active benchmark evidence and disposable Postgres smoke |
 | `M3 Preview + Render` | Not started as production lane | Preferred direction remains `Vizard-first + FFmpeg fallback` |
 | `M4 QA + Approval + Delivery` | Not started | Approval and QA model are specified, not yet implemented end-to-end |
 | `M5 Feedback + Ops` | Not started | Analytics and operations surfaces remain future work |
 
 ## Prerequisites
 
-- Python `>=3.11`
+- Python `>=3.11,<3.13`
 - `uv`
 - `ffmpeg`
 - `ffprobe`
@@ -272,6 +272,10 @@ make dev-up
 uv sync
 uv run alembic upgrade head
 ```
+
+`backend/.env.example` now defaults to the `stub` ASR provider so the local pipeline can boot without cloud credentials.
+To use Groq or OpenAI transcription, set `ASR_PROVIDER_PRIMARY` and the matching API key in `.env`.
+For a narrow machine-specific setup on macOS, see [backend/macos-runbook.md](backend/macos-runbook.md).
 
 Run the API:
 
@@ -352,19 +356,19 @@ Optional manifest fields:
 Run the offline analysis from `backend/`:
 
 ```bash
-REFERENCE_COLLECTION_DIR=..\references\my-pack OUTPUT_DIR=..\references\my-pack\outputs PRESET_NAME=my-pack-v1 PROMPT_VERSION=v1 SCORING_POLICY_VERSION=v1 make reference-intelligence
+REFERENCE_COLLECTION_DIR=../references/my-pack OUTPUT_DIR=../references/my-pack/outputs PRESET_NAME=my-pack-v1 PROMPT_VERSION=v1 SCORING_POLICY_VERSION=v1 make reference-intelligence
 ```
 
 Enable OCR/VLM only when you actually need them:
 
 ```bash
-REFERENCE_COLLECTION_DIR=..\references\my-pack OUTPUT_DIR=..\references\my-pack\outputs PRESET_NAME=my-pack-v1 PROMPT_VERSION=v1 SCORING_POLICY_VERSION=v1 OCR_PROVIDER=auto VLM_PROVIDER=openai VLM_MODEL=<vision-model> OPENAI_API_KEY=<key> make reference-intelligence
+REFERENCE_COLLECTION_DIR=../references/my-pack OUTPUT_DIR=../references/my-pack/outputs PRESET_NAME=my-pack-v1 PROMPT_VERSION=v1 SCORING_POLICY_VERSION=v1 OCR_PROVIDER=auto VLM_PROVIDER=openai VLM_MODEL=<vision-model> OPENAI_API_KEY=<key> make reference-intelligence
 ```
 
 Generate a benchmark-gated comparison report only when both benchmark payloads already exist:
 
 ```bash
-REFERENCE_COLLECTION_DIR=..\references\my-pack OUTPUT_DIR=..\references\my-pack\outputs PRESET_NAME=my-pack-v1 PROMPT_VERSION=v1 SCORING_POLICY_VERSION=preset-my-pack-v1 BASELINE_BENCHMARK_PATH=..\tmp\baseline.json CANDIDATE_BENCHMARK_PATH=..\tmp\candidate.json make reference-intelligence-benchmark
+REFERENCE_COLLECTION_DIR=../references/my-pack OUTPUT_DIR=../references/my-pack/outputs PRESET_NAME=my-pack-v1 PROMPT_VERSION=v1 SCORING_POLICY_VERSION=preset-my-pack-v1 BASELINE_BENCHMARK_PATH=../tmp/baseline.json CANDIDATE_BENCHMARK_PATH=../tmp/candidate.json make reference-intelligence-benchmark
 ```
 
 Generated artifacts:

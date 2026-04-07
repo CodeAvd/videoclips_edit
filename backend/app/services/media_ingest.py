@@ -98,6 +98,12 @@ async def build_ingest_outputs(*, filename: str, content_type: str, body: bytes)
         temp_path = Path(temp_dir)
         input_path = temp_path / f"source{extension_for_filename(filename, content_type)}"
         input_path.write_bytes(body)
+        return await build_ingest_outputs_from_path(input_path=input_path)
+
+
+async def build_ingest_outputs_from_path(*, input_path: Path) -> IngestOutput:
+    with tempfile.TemporaryDirectory(prefix="ai-shorts-ingest-") as temp_dir:
+        temp_path = Path(temp_dir)
 
         probe = await probe_media(input_path)
         if not probe.has_audio:

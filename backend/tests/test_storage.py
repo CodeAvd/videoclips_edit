@@ -46,3 +46,21 @@ def test_filesystem_storage_rejects_path_escape(tmp_path: Path) -> None:
             content_type="application/octet-stream",
             body=b"bad",
         )
+
+
+async def test_filesystem_storage_stream_upload(tmp_path: Path) -> None:
+    service = FilesystemStorageService(build_settings(tmp_path))
+
+    async def chunk_stream():
+        for chunk in (b"hello", b"-", b"shorts"):
+            yield chunk
+
+    await service.write_upload_stream(
+        storage_key="uploads/session-2/video.bin",
+        content_type="application/octet-stream",
+        chunks=chunk_stream(),
+    )
+
+    stored_path = tmp_path / "uploads" / "session-2" / "video.bin"
+    assert stored_path.exists()
+    assert stored_path.read_bytes() == b"hello-shorts"

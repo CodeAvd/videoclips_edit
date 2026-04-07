@@ -81,19 +81,19 @@ Each run writes:
 From `backend/`:
 
 ```bash
-REFERENCE_COLLECTION_DIR=..\references\my-pack OUTPUT_DIR=..\references\my-pack\outputs PRESET_NAME=my-pack-v1 PROMPT_VERSION=v1 SCORING_POLICY_VERSION=v1 make reference-intelligence
+REFERENCE_COLLECTION_DIR=../references/my-pack OUTPUT_DIR=../references/my-pack/outputs PRESET_NAME=my-pack-v1 PROMPT_VERSION=v1 SCORING_POLICY_VERSION=v1 make reference-intelligence
 ```
 
 To add an offline comparison report when both benchmark payloads already exist:
 
 ```bash
-REFERENCE_COLLECTION_DIR=..\references\my-pack OUTPUT_DIR=..\references\my-pack\outputs PRESET_NAME=my-pack-v1 PROMPT_VERSION=v1 SCORING_POLICY_VERSION=preset-my-pack-v1 BASELINE_BENCHMARK_PATH=..\tmp\baseline.json CANDIDATE_BENCHMARK_PATH=..\tmp\candidate.json make reference-intelligence-benchmark
+REFERENCE_COLLECTION_DIR=../references/my-pack OUTPUT_DIR=../references/my-pack/outputs PRESET_NAME=my-pack-v1 PROMPT_VERSION=v1 SCORING_POLICY_VERSION=preset-my-pack-v1 BASELINE_BENCHMARK_PATH=../tmp/baseline.json CANDIDATE_BENCHMARK_PATH=../tmp/candidate.json make reference-intelligence-benchmark
 ```
 
 Optional providers can be enabled explicitly:
 
 ```bash
-REFERENCE_COLLECTION_DIR=..\references\my-pack OUTPUT_DIR=..\references\my-pack\outputs PRESET_NAME=my-pack-v1 PROMPT_VERSION=v1 SCORING_POLICY_VERSION=v1 OCR_PROVIDER=auto VLM_PROVIDER=openai VLM_MODEL=<vision-model> OPENAI_API_KEY=<key> make reference-intelligence
+REFERENCE_COLLECTION_DIR=../references/my-pack OUTPUT_DIR=../references/my-pack/outputs PRESET_NAME=my-pack-v1 PROMPT_VERSION=v1 SCORING_POLICY_VERSION=v1 OCR_PROVIDER=auto VLM_PROVIDER=openai VLM_MODEL=<vision-model> OPENAI_API_KEY=<key> make reference-intelligence
 ```
 
 This lane is intentionally offline-only:

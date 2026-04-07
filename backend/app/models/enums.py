@@ -43,6 +43,32 @@ class CandidateLabelValue(StrEnum):
     reject = "reject"
 
 
+class ProofShortlistSystem(StrEnum):
+    engine = "engine"
+    manual = "manual"
+    vizard = "vizard"
+
+
+class ProofReviewStatus(StrEnum):
+    in_progress = "in_progress"
+    completed = "completed"
+
+
+class ProofDecisionValue(StrEnum):
+    approve = "approve"
+    reject = "reject"
+
+
+class ProofRejectReasonCode(StrEnum):
+    weak_opening = "weak_opening"
+    late_or_missing_payoff = "late_or_missing_payoff"
+    needs_context = "needs_context"
+    fragmented_cut = "fragmented_cut"
+    duplicate_angle = "duplicate_angle"
+    off_topic_or_low_signal = "off_topic_or_low_signal"
+    review_timeout = "review_timeout"
+
+
 class Platform(StrEnum):
     youtube_shorts = "youtube_shorts"
     instagram_reels = "instagram_reels"

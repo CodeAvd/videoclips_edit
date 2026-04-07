@@ -27,6 +27,10 @@ from app.models.enums import (
     JobStatus,
     OutboxStatus,
     Platform,
+    ProofDecisionValue,
+    ProofRejectReasonCode,
+    ProofReviewStatus,
+    ProofShortlistSystem,
     ProvenanceType,
     SourceType,
     StageName,
@@ -261,6 +265,7 @@ class EvalSetMember(CreatedAtMixin, BaseModel):
 
     eval_set_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("eval_set.id"), primary_key=True)
     source_video_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("source_video.id"), primary_key=True)
+    metadata_jsonb: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
 
 class CandidateLabel(UuidPrimaryKeyMixin, CreatedAtMixin, BaseModel):
@@ -331,3 +336,123 @@ class CandidateClip(UuidPrimaryKeyMixin, CreatedAtMixin, BaseModel):
     topic_cluster: Mapped[str | None] = mapped_column(String(128))
     length_bucket: Mapped[str] = mapped_column(String(32), nullable=False)
     rationale_jsonb: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+
+
+class ProofShortlist(UuidPrimaryKeyMixin, CreatedAtMixin, BaseModel):
+    __tablename__ = "proof_shortlist"
+    __table_args__ = (
+        UniqueConstraint("source_video_id", "system_name", "version_no", name="uq_proof_shortlist_source_system_version"),
+        Index("ix_proof_shortlist_source_system_current", "source_video_id", "system_name", "is_current"),
+    )
+
+    source_video_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("source_video.id"), nullable=False)
+    job_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True), ForeignKey("job.id"))
+    eval_set_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True), ForeignKey("eval_set.id"))
+    system_name: Mapped[ProofShortlistSystem] = mapped_column(Enum(ProofShortlistSystem, native_enum=False), nullable=False)
+    version_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    is_current: Mapped[bool] = mapped_column(nullable=False, default=True)
+    candidate_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    generation_time_seconds: Mapped[int | None] = mapped_column(Integer)
+    source_candidate_set_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True), ForeignKey("candidate_set.id"))
+    artifact_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True), ForeignKey("artifact_object.id"))
+    actor_ref: Mapped[str | None] = mapped_column(String(255))
+    prompt_version: Mapped[str | None] = mapped_column(String(128))
+    scoring_policy_version: Mapped[str | None] = mapped_column(String(128))
+    metadata_jsonb: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+
+
+class ProofShortlistCandidate(UuidPrimaryKeyMixin, CreatedAtMixin, BaseModel):
+    __tablename__ = "proof_shortlist_candidate"
+    __table_args__ = (
+        UniqueConstraint("proof_shortlist_id", "rank_no", name="uq_proof_shortlist_candidate_rank"),
+        Index("ix_proof_shortlist_candidate_shortlist", "proof_shortlist_id", "rank_no"),
+    )
+
+    proof_shortlist_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("proof_shortlist.id"), nullable=False)
+    source_candidate_clip_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True), ForeignKey("candidate_clip.id"))
+    rank_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    start_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    end_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    transcript_excerpt: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    duplicate_group: Mapped[str | None] = mapped_column(String(128))
+    topic_cluster: Mapped[str | None] = mapped_column(String(128))
+    length_bucket: Mapped[str | None] = mapped_column(String(32))
+    rationale_jsonb: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    metadata_jsonb: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    preview_artifact_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True), ForeignKey("artifact_object.id"))
+
+
+class ProofReviewSession(UuidPrimaryKeyMixin, CreatedAtMixin, UpdatedAtMixin, BaseModel):
+    __tablename__ = "proof_review_session"
+
+    eval_set_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("eval_set.id"), nullable=False)
+    source_video_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("source_video.id"), nullable=False)
+    reviewer_actor_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[ProofReviewStatus] = mapped_column(Enum(ProofReviewStatus, native_enum=False), nullable=False, default=ProofReviewStatus.in_progress)
+    time_budget_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=600)
+    is_audit: Mapped[bool] = mapped_column(nullable=False, default=False)
+    protocol_version: Mapped[str] = mapped_column(String(64), nullable=False, default="stage_a_v1")
+
+
+class ProofReviewBatch(BaseModel):
+    __tablename__ = "proof_review_batch"
+    __table_args__ = (
+        UniqueConstraint("proof_review_session_id", "batch_code", name="uq_proof_review_batch_code"),
+        UniqueConstraint("proof_review_session_id", "proof_shortlist_id", name="uq_proof_review_batch_shortlist"),
+    )
+
+    proof_review_session_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("proof_review_session.id"), primary_key=True)
+    batch_code: Mapped[str] = mapped_column(String(1), primary_key=True)
+    proof_shortlist_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("proof_shortlist.id"), nullable=False)
+    system_name: Mapped[ProofShortlistSystem] = mapped_column(Enum(ProofShortlistSystem, native_enum=False), nullable=False)
+    display_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    elapsed_review_seconds: Mapped[int | None] = mapped_column(Integer)
+
+
+class ProofReviewDecision(UuidPrimaryKeyMixin, CreatedAtMixin, BaseModel):
+    __tablename__ = "proof_review_decision"
+    __table_args__ = (
+        UniqueConstraint("proof_review_session_id", "proof_shortlist_candidate_id", name="uq_proof_review_decision_candidate"),
+        Index("ix_proof_review_decision_session_batch", "proof_review_session_id", "batch_code"),
+    )
+
+    proof_review_session_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("proof_review_session.id"), nullable=False)
+    batch_code: Mapped[str] = mapped_column(String(1), nullable=False)
+    proof_shortlist_candidate_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("proof_shortlist_candidate.id"), nullable=False)
+    decision: Mapped[ProofDecisionValue] = mapped_column(Enum(ProofDecisionValue, native_enum=False), nullable=False)
+    reject_reason_code: Mapped[ProofRejectReasonCode | None] = mapped_column(Enum(ProofRejectReasonCode, native_enum=False))
+    rationale_helpful: Mapped[bool] = mapped_column(nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text)
+
+
+class ProofReviewPreference(BaseModel):
+    __tablename__ = "proof_review_preference"
+    __table_args__ = (
+        UniqueConstraint("proof_review_session_id", "rank_no", name="uq_proof_review_preference_rank"),
+    )
+
+    proof_review_session_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("proof_review_session.id"), primary_key=True)
+    rank_no: Mapped[int] = mapped_column(Integer, primary_key=True)
+    batch_code: Mapped[str] = mapped_column(String(1), nullable=False)
+
+
+class ProofComparisonRun(UuidPrimaryKeyMixin, CreatedAtMixin, BaseModel):
+    __tablename__ = "proof_comparison_run"
+
+    eval_set_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("eval_set.id"), nullable=False)
+    artifact_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True), ForeignKey("artifact_object.id"))
+    actor_ref: Mapped[str | None] = mapped_column(String(255))
+    protocol_version: Mapped[str] = mapped_column(String(64), nullable=False, default="stage_a_v1")
+
+
+class ProofComparisonResult(UuidPrimaryKeyMixin, CreatedAtMixin, BaseModel):
+    __tablename__ = "proof_comparison_result"
+    __table_args__ = (
+        Index("ix_proof_comparison_result_run_source_system", "proof_comparison_run_id", "source_video_id", "system_name"),
+    )
+
+    proof_comparison_run_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("proof_comparison_run.id"), nullable=False)
+    source_video_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("source_video.id"), nullable=False)
+    system_name: Mapped[ProofShortlistSystem] = mapped_column(Enum(ProofShortlistSystem, native_enum=False), nullable=False)
+    metric_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    metric_value: Mapped[float] = mapped_column(Numeric(12, 4), nullable=False)

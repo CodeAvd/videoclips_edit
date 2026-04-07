@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Body, Depends, Response, status
+from fastapi import APIRouter, Depends, Request, Response, status
 from sqlalchemy import select
 
 from app.api.deps import Actor, DbSession, IdempotencyKey, Storage
@@ -53,9 +53,9 @@ async def create_upload_session(payload: CreateUploadSessionRequest, db: DbSessi
 )
 async def upload_content(
     upload_id: UUID,
+    request: Request,
     db: DbSession,
     storage: Storage,
-    body: bytes = Body(..., media_type="application/octet-stream"),
 ) -> Response:
     upload = await db.get(UploadSession, upload_id)
     if upload is None:
@@ -68,7 +68,11 @@ async def upload_content(
     if not storage.supports_direct_app_upload():
         raise AppError(code="unsupported_operation", message="Active storage backend does not support direct app uploads.", http_status=409)
     try:
-        storage.write_upload_bytes(storage_key=upload.storage_key, content_type=upload.content_type, body=body)
+        await storage.write_upload_stream(
+            storage_key=upload.storage_key,
+            content_type=upload.content_type,
+            chunks=request.stream(),
+        )
     except StorageError as exc:
         raise AppError(code="storage_error", message=str(exc), http_status=502) from exc
     return Response(status_code=status.HTTP_204_NO_CONTENT)

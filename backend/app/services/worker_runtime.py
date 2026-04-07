@@ -2,6 +2,7 @@ import asyncio
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+import tempfile
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -59,7 +60,7 @@ from app.services.feature_extract import (
     summarize_features,
 )
 from app.services.intake_policy import IntakeInput, evaluate_intake
-from app.services.media_ingest import build_ingest_outputs
+from app.services.media_ingest import build_ingest_outputs_from_path
 from app.services.orchestration import enqueue_stage, transition_job_status
 from app.services.source_video_artifacts import get_preferred_video_artifact, get_source_video_artifact
 from app.services.storage import get_storage_service
@@ -342,12 +343,14 @@ async def handle_ingest(job_id: UUID, attempt_no: int, *, worker_id: str, sessio
         role=SourceVideoArtifactRole.source_asset,
     )
     storage = get_storage_service()
-    source_bytes = storage.read_bytes(storage_key=source_asset.storage_key)
-    ingest_output = await build_ingest_outputs(
-        filename=Path(source_asset.storage_key).name,
-        content_type=source_asset.mime_type,
-        body=source_bytes,
-    )
+    source_path = storage.local_path_for_key(storage_key=source_asset.storage_key)
+    if source_path is not None:
+        ingest_output = await build_ingest_outputs_from_path(input_path=source_path)
+    else:
+        with tempfile.TemporaryDirectory(prefix="ai-shorts-source-") as temp_dir:
+            staged_input_path = Path(temp_dir) / Path(source_asset.storage_key).name
+            storage.materialize_to_path(storage_key=source_asset.storage_key, destination=staged_input_path)
+            ingest_output = await build_ingest_outputs_from_path(input_path=staged_input_path)
     if source_video.duration_ms is None and ingest_output.probe.duration_ms is not None:
         source_video.duration_ms = ingest_output.probe.duration_ms
 
